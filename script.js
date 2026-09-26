@@ -6,7 +6,7 @@
  */
 (() => {
   'use strict';
-  const VERSION = '2.0.0';
+  const VERSION = '2.0.1';
   const DB_NAME = 'sanavera-mp3-v2';
   const RESUME_KEY = 'smp.v2.resume';
   const FALLBACK_KEY = 'smp.v2.fallback';
@@ -188,7 +188,8 @@
   let tracks=new Map(),albums=new Map();
   let dirtyTracks=new Set(),dirtyAlbums=new Set(),saveTimer=0,saveChain=Promise.resolve(),storageFailed=false;
   let view={name:'home',id:null},viewSerial=0,albumController=null,searchController=null,debounceTimer=0,dataEpoch=0;
-  let searchState={query:'',mode:'all',sort:'relevance',page:0,total:0,items:[],trackIds:[],busy:false,error:'',scanned:0};
+  const emptySearch = () => ({query:'',mode:'all',sort:'relevance',page:0,total:0,items:[],trackIds:[],busy:false,error:'',scanned:0,cursor:null,hasMore:false,filtered:0,limitReached:false});
+  let searchState=emptySearch();
   let discovery={items:[],loading:false,error:''},trackDisplayLimit=80,trackContext=[],queueDisplayLimit=80,libraryAlbumLimit=36,libraryPlaylistLimit=40;
   let player={queue:[],index:-1,order:[],cursor:0,source:null,token:0,wants:false,position:0,pendingSeek:null,attempted:new Set(),refreshed:false,failures:0,counted:false,heard:0,lastTime:0,lastWall:0,watchdog:0,error:'',sleepAt:0,sleepEnd:false};
   let toastTimer=0,lastResumeWrite=0,lastPositionUpdate=0,dialogAction=null,returnFocus=null,fullReturnFocus=null;
@@ -243,33 +244,104 @@
     throw last;
   }
   const lucene=s=>text(s,'',160).replace(/[+\-!(){}\[\]^"~*?:\\/]|&&|\|\|/g,' ').replace(/\s+/g,' ').trim();
+  const SPOKEN_QUERY='(collection:(librivoxaudio OR podcasts OR audio_news) OR subject:(podcast OR podcasts OR audiobook OR audiobooks OR audiolibro OR audiolibros OR "spoken word" OR entrevista OR entrevistas OR interview OR interviews))';
+  // Una onda generada no identifica un podcast. Sin autor ni portada identificable,
+  // el resultado sigue accesible, pero detrás de las coincidencias mejor descritas.
+  const SECONDARY_QUERY=`(${SPOKEN_QUERY} OR title:("ENG artista" OR "Enganchados artista") OR (format:Spectrogram AND NOT (format:JPEG OR format:"JPEG Thumb") AND NOT (creator:* OR artist:*)))`;
+  const SEARCH_GROUPS=['Coincide el artista','Coincide el título o álbum','En la descripción o las etiquetas','Otras coincidencias','Resultados secundarios'];
+  const hasPhrase=(value,phrase)=>!!phrase&&(` ${value} `).includes(` ${phrase} `);
+  const hasWords=(value,query)=>{const words=new Set(value.split(' '));return !!query&&query.split(' ').every(w=>words.has(w));};
   function searchQuery(query,mode,musicOnly){
     const safe=lucene(query), terms=safe.split(' ').filter(Boolean).slice(0,15), phrase=`"${safe}"`;
     const and=terms.map(s=>`"${s}"`).join(' AND ');
-    let q=safe?(mode==='artist'?`(creator:(${and}) OR artist:(${and}))`:mode==='album'?`(title:(${and}) OR album:(${and}))`:mode==='song'?`(title:(${and}) OR description:(${and}) OR (${and}))`:`(title:${phrase}^4 OR creator:${phrase}^3 OR (${and}))`):'(subject:music OR subject:musica OR collection:etree OR collection:netlabels)';
+    let q=safe?(mode==='artist'?`(creator:${phrase}^20 OR artist:${phrase}^20 OR creator:(${and}) OR artist:(${and}))`:mode==='album'?`(title:${phrase}^10 OR title:(${and}) OR album:(${and}))`:mode==='song'?`(title:${phrase}^10 OR title:(${and}) OR description:(${and}) OR (${and}))`:`(creator:${phrase}^30 OR artist:${phrase}^30 OR title:${phrase}^10 OR description:${phrase}^2 OR (${and}))`):'(subject:music OR subject:musica OR collection:etree OR collection:netlabels)';
     q=`(${q}) AND (mediatype:audio OR mediatype:etree) AND NOT access-restricted-item:true`;
-    // Una preferencia, no una garantía: los metadatos públicos pueden estar mal clasificados.
-    if(musicOnly)q+=' AND NOT collection:librivoxaudio AND NOT collection:podcasts AND NOT subject:audiobook AND NOT subject:podcast';
+    if(musicOnly)q+=` AND NOT ${SPOKEN_QUERY}`;
     return q;
   }
-  function searchDoc(d){
+  function searchGroups(query,mode,musicOnly){
+    const base=searchQuery(query,mode,musicOnly), safe=lucene(query);
+    if(mode!=='all'||!safe)return [{q:base,group:-1}];
+    const and=safe.split(' ').filter(Boolean).slice(0,15).map(w=>`"${w}"`).join(' AND ');
+    const artist=`(creator:(${and}) OR artist:(${and}))`, title=`(title:(${and}) OR album:(${and}))`, description=`(description:(${and}) OR subject:(${and}))`;
+    const primary=`(${base}) AND NOT ${SECONDARY_QUERY}`;
+    // Grupos excluyentes y paginados por separado: ningún resultado de descripción
+    // ocupa el lugar de un artista que Archive haya dejado para la página siguiente.
+    return [
+      {q:`${primary} AND ${artist}`,group:0},
+      {q:`${primary} AND ${title} AND NOT ${artist}`,group:1},
+      {q:`${primary} AND ${description} AND NOT (${artist} OR ${title})`,group:2},
+      {q:`${primary} AND NOT (${artist} OR ${title} OR ${description})`,group:3},
+      {q:`(${base}) AND ${SECONDARY_QUERY}`,group:4}
+    ];
+  }
+  function searchDoc(d,musicOnly){
     if(!d||!validId(d.identifier))return null;
     const formats=Array.isArray(d.format)?d.format:[d.format];
-    if(formats.some(Boolean)&&!formats.some(f=>/mp3|flac|wave|vorbis|opus|aac|mpeg4|apple lossless|aiff/i.test(text(f))))return null;
-    return cleanAlbum({id:d.identifier,title:d.title,artist:d.creator||d.artist,year:d.year||text(d.date).slice(0,4),subjects:d.subject,downloads:d.downloads});
+    if(formats.some(Boolean)&&!formats.some(f=>/mp3|flac|wav|vorbis|opus|aac|mpeg.?4|m4a|apple lossless|aiff|wma/i.test(text(f))))return null;
+    const title=norm(d.title), subjects=norm(text(d.subject,'',4000));
+    const collections=(Array.isArray(d.collection)?d.collection:[d.collection]).map(c=>norm(c));
+    const description=plainHTML(d.description);
+    // También detectar programas que quedaron fuera de las colecciones de podcasts.
+    // No buscar "radio" o "entrevista" a ciegas dentro de una reseña de un disco.
+    const spoken=collections.some(c=>/^(podcasts?|librivoxaudio|audio news|.* podcasts?)$/.test(c))||
+      /\b(podcasts?|audiobooks?|audiolibros?|spoken word|entrevistas?|interviews?)\b/.test(subjects)||
+      /^(?:podcast\s+\S|entrevista\s+(?:a|al|con)\s|interview\s+with\s)/.test(title)||
+      (/^(?:nota|charla|conversacion)\s+(?:a|al|con)\s/.test(title)&&/^(?:nota|entrevista|charla|conversacion)\s/.test(norm(description)))||
+      (/\b(?:episodio|episode|capitulo)\s+\d+\b/.test(title)&&/\bpodcast\b/.test(norm(description)));
+    if(musicOnly&&spoken)return null;
+    const artists=[...(Array.isArray(d.creator)?d.creator:[d.creator]),...(Array.isArray(d.artist)?d.artist:[d.artist])].map(a=>text(a)).filter(Boolean);
+    const album=cleanAlbum({id:d.identifier,title:d.title,artist:text(d.artist)||d.creator,year:d.year||text(d.date).slice(0,4),description,subjects:d.subject,downloads:d.downloads});
+    // Estos datos sirven sólo al buscador; no cambian el formato de la biblioteca.
+    album.searchInfo={artists,album:text(d.album),added:Date.parse(text(d.addeddate))||0,spoken};
+    return album;
   }
-  function relevance(a,q){const n=norm(q),t=norm(a.title),ar=norm(a.artist);let score=t===n?200:ar===n?170:0;if(t.includes(n))score+=70;if(ar.includes(n))score+=65;for(const word of n.split(' ')){if(t.includes(word))score+=6;if(ar.includes(word))score+=5;}return score;}
-  async function searchArchive(query,mode,page,sort,signal){
-    const key=`search:${query}:${mode}:${page}:${sort}:${meta.settings.musicOnly}`;
-    const cached=await db.cached(key,30*60*1000);if(cached&&!signal?.aborted)return cached;
-    const params=new URLSearchParams({q:searchQuery(query,mode,meta.settings.musicOnly),output:'json',rows:String(mode==='song'?12:LIMIT.page),page:String(page)});
-    ['identifier','title','creator','year','date','format','downloads','subject'].forEach(f=>params.append('fl[]',f));
-    if(sort!=='relevance')params.append('sort[]',sort==='newest'?'addeddate desc':'downloads desc');
-    const data=await requestJSON(`https://archive.org/advancedsearch.php?${params}`,signal);
-    if(!data.response||!Array.isArray(data.response.docs))throw new Error('Archive cambió su respuesta de búsqueda. Probá nuevamente más tarde.');
-    const items=data.response.docs.map(searchDoc).filter(Boolean);
-    if(sort==='relevance')items.sort((a,b)=>relevance(b,query)-relevance(a,query));
-    const result={items,total:clamp(data.response.numFound,0,1e10)};await db.cachePut(key,result);return result;
+  function relevance(a,q,mode='all'){
+    const n=norm(q);if(!n)return 0;
+    const match=value=>{const v=norm(value);return v===n?100:hasPhrase(v,n)?70:hasWords(v,n)?40:0;};
+    const artist=Math.max(0,...(a.searchInfo?.artists||[a.artist]).map(match));
+    const title=Math.max(match(a.title),match(a.searchInfo?.album));
+    return (mode==='song'||mode==='album'?title*100+artist:artist*100+title*10)+match(a.description)+match(a.subjects)/2;
+  }
+  function compareResults(a,b,query,mode,sort){
+    const group=number(a.searchGroup)-number(b.searchGroup);if(group)return group;
+    if(sort==='newest')return number(b.searchInfo?.added)-number(a.searchInfo?.added)||a.id.localeCompare(b.id);
+    if(sort==='downloads')return b.downloads-a.downloads||a.id.localeCompare(b.id);
+    return relevance(b,query,mode)-relevance(a,query,mode)||b.downloads-a.downloads||a.id.localeCompare(b.id);
+  }
+  async function searchArchive(query,mode,page,sort,signal,cursor=null){
+    const musicOnly=meta.settings.musicOnly, groups=searchGroups(query,mode,musicOnly), rows=mode==='song'?12:LIMIT.page;
+    let position=cursor?{...cursor}:{group:0,page:1}, filtered=0,limitReached=false,total=0;
+    // Avanzar por grupos vacíos, con un límite por acción para no bombardear Archive.
+    for(let attempt=0;attempt<5&&position.group<groups.length;attempt++){
+      if(signal?.aborted)throw new DOMException('Cancelado','AbortError');
+      const group=groups[position.group];
+      const key=`search:2.0.1:${query}:${mode}:${position.group}:${position.page}:${sort}:${musicOnly}`;
+      let result=await db.cached(key,30*60*1000);
+      if(signal?.aborted)throw new DOMException('Cancelado','AbortError');
+      if(!result){
+        const params=new URLSearchParams({q:group.q,output:'json',rows:String(rows),page:String(position.page)});
+        ['identifier','title','creator','artist','album','year','date','addeddate','format','downloads','subject','collection','description'].forEach(f=>params.append('fl[]',f));
+        // Archive usa relevancia al omitir sort; no admite ordenar por "score".
+        if(sort!=='relevance'){
+          params.append('sort[]',sort==='newest'?'addeddate desc':'downloads desc');
+          params.append('sort[]','identifier asc');
+        }
+        const data=await requestJSON(`https://archive.org/advancedsearch.php?${params}`,signal);
+        if(!data.response||!Array.isArray(data.response.docs))throw new Error('Archive cambió su respuesta de búsqueda. Probá nuevamente más tarde.');
+        const items=data.response.docs.map(d=>searchDoc(d,musicOnly)).filter(Boolean);
+        result={items,total:clamp(data.response.numFound,0,1e10),rawCount:data.response.docs.length,filtered:data.response.docs.length-items.length};
+        if(signal?.aborted)throw new DOMException('Cancelado','AbortError');
+        await db.cachePut(key,result);
+      }
+      total=result.total;filtered+=result.filtered;
+      const offset=position.page*rows;
+      if(offset>=10000&&offset<total)limitReached=true;
+      position=offset>=Math.min(total,10000)||!result.rawCount?{group:position.group+1,page:1}:{group:position.group,page:position.page+1};
+      const items=result.items.map(a=>({...a,searchGroup:group.group})).sort((a,b)=>compareResults(a,b,query,mode,sort));
+      if(items.length||position.group>=groups.length)return {items,total,filtered,limitReached,next:position.group<groups.length?position:null};
+    }
+    return {items:[],total,filtered,limitReached,next:position.group<groups.length?position:null};
   }
   function parseMetadata(id,data){
     if(!data||data.is_dark===true||data.is_dark==='true'||!data.metadata)throw new Error('Este álbum fue retirado o ya no es público.');
@@ -370,6 +442,7 @@
   function renderSearch(){
     const q=searchState.query;
     main.innerHTML=pageHead(q?`Buscando «${q}»`:'Explorá a tu ritmo','Un artista, ese disco o una canción que no te podés sacar de la cabeza.')+searchFilters()+
+      (q&&searchState.mode==='all'?'<p class="smp-note">Primero el artista, después el título o álbum y luego la descripción. El orden elegido se aplica dentro de cada grupo. Los resultados secundarios aparecen al final.</p>':'')+
       (searchState.mode==='song'?'<p class="smp-note">Buscamos publicaciones relacionadas y revisamos los títulos de sus pistas. Archive no tiene un índice completo de canciones: si no aparece, probá con el artista o el álbum.</p>':'')+
       `<div id="smp-search-results">${searchResultsHTML()}</div>`;
   }
@@ -377,32 +450,36 @@
     const s=searchState, hasQuery=s.page>0||s.busy||s.error;
     if(!hasQuery){return `${meta.searches.length?sectionHead('Tus últimas búsquedas')+`<div class="smp-pills">${meta.searches.map(q=>btn(q,'quick-search',{query:q},'smp-pill','history')).join('')}</div>`:''}${sectionHead('Elegí por dónde empezar')}${genres()}${sectionHead('También podés abrir un álbum')}<form id="smp-open-archive" class="smp-searchbar"><span data-icon="disc">${icon('disc')}</span><input name="archive" type="text" placeholder="Pegá un enlace de archive.org/details/…" aria-label="Enlace o identificador de Archive" maxlength="500" /><button type="submit" class="smp-icon-button" aria-label="Abrir enlace">${icon('arrow')}</button></form>`;}
     if(s.busy&&!s.items.length)return skeleton();
-    let html=`<div class="smp-results-meta"><span>${s.total.toLocaleString('es-AR')} publicaciones encontradas${s.mode==='song'?` · ${s.scanned} revisadas`:''}</span><span>${meta.settings.musicOnly?'Filtro musical activo':'Todo el audio'}</span></div>`;
+    let html=`<div class="smp-results-meta"><span>${s.items.length.toLocaleString('es-AR')} publicaciones mostradas${s.mode==='song'?` · ${s.scanned} revisadas`:''}${s.filtered?` · ${s.filtered} descartadas`:''}</span><span>${meta.settings.musicOnly?'Filtro musical activo':'Todo el audio'}</span></div>`;
     if(s.error)html+=empty('No pudimos completar la búsqueda',s.error,btn('Reintentar','search-retry'),'wifi');
     if(s.mode==='song'&&s.trackIds.length)html+=sectionHead('Canciones encontradas')+trackRows(s.trackIds);
-    if(s.items.length)html+=(s.mode==='song'?sectionHead('Publicaciones relacionadas',s.trackIds.length?'Podés explorar el resto de las pistas.':'No encontramos ese título entre las pistas revisadas. Mirá estas publicaciones.'):'')+albumCards(s.items);
-    else if(!s.busy&&!s.error)html+=empty('Por acá todavía no suena nada','Probá menos palabras, otro artista o desactivá el filtro musical en Ajustes.',btn('Buscar otra cosa','focus-search'),'search');
+    if(s.items.length){
+      if(s.mode==='all'&&lucene(s.query)){
+        SEARCH_GROUPS.forEach((label,index)=>{const items=s.items.filter(a=>a.searchGroup===index);if(items.length)html+=sectionHead(label,index===4?'Publicaciones con datos incompletos, enganchados y otras coincidencias de menor prioridad.':'')+albumCards(items);});
+      }else html+=(s.mode==='song'?sectionHead('Publicaciones relacionadas',s.trackIds.length?'Podés explorar el resto de las pistas.':'No encontramos ese título entre las pistas revisadas. Mirá estas publicaciones.'):'')+albumCards(s.items);
+    }else if(!s.busy&&!s.error)html+=empty(s.hasMore?'Seguimos buscando música':'Por acá todavía no suena nada',s.hasMore?'Esta tanda no tenía audio musical identificable. Podés revisar las siguientes coincidencias.':'Probá menos palabras, otro artista o desactivá el filtro musical en Ajustes.',s.hasMore?'':btn('Buscar otra cosa','focus-search'),'search');
     if(s.busy)html+='<div class="smp-boot" style="padding:24px"><span class="smp-spinner"></span><p>Buscando música…</p></div>';
-    else if(s.page*(s.mode==='song'?12:LIMIT.page)<Math.min(s.total,10000))html+=`<div class="smp-load-more">${btn('Cargar más resultados','search-more',{},'smp-button','down')}</div>`;
-    else if(s.total>=10000)html+='<p class="smp-note">Llegaste al límite de resultados de Archive para esta búsqueda. Agregá un artista o álbum para afinarla.</p>';
+    else if(s.hasMore)html+=`<div class="smp-load-more">${btn('Cargar más resultados','search-more',{},'smp-button','down')}</div>`;
+    if(s.limitReached)html+='<p class="smp-note">Archive limita cada grupo a 10.000 resultados. Agregá un artista o álbum para afinar la búsqueda.</p>';
     return html;
   }
   function repaintSearch(){if(view.name==='search'){const el=$('#smp-search-results');if(el)el.innerHTML=searchResultsHTML();}}
   async function runSearch(query,{more=false}={}){
     clearTimeout(debounceTimer);query=text(query,'',160);
-    if(more&&searchState.busy)return;
+    if(more&&(searchState.busy||!searchState.hasMore))return;
     searchController?.abort();const controller=new AbortController();searchController=controller;
-    if(!more){searchState={...searchState,query,page:0,total:0,items:[],trackIds:[],error:'',scanned:0,busy:false};trackDisplayLimit=80;}
+    if(!more){searchState={...emptySearch(),mode:searchState.mode,sort:searchState.sort,query};trackDisplayLimit=80;}
     const page=searchState.page+1, mode=searchState.mode, sort=searchState.sort;
     searchState.busy=true;searchState.error='';
     if(view.name!=='search')navigate('search');else if(!more)renderSearch();else repaintSearch();
     if(query&&!more){meta.searches=unique([query,...meta.searches]).slice(0,10);changed();}
     try{
-      const result=await searchArchive(query,mode,page,sort,controller.signal);
+      const result=await searchArchive(query,mode,page,sort,controller.signal,more?searchState.cursor:null);
       if(controller.signal.aborted)return;
-      searchState.page=page;searchState.total=result.total;
+      searchState.page=page;searchState.total=result.total;searchState.cursor=result.next;searchState.hasMore=!!result.next;searchState.filtered+=result.filtered;searchState.limitReached||=result.limitReached;
       const known=new Set(searchState.items.map(a=>a.id));
       for(const a of result.items){if(!known.has(a.id)){searchState.items.push(a);known.add(a.id);}if(!albums.has(a.id))rememberAlbum(a);}
+      searchState.items.sort((a,b)=>compareResults(a,b,query,mode,sort));
       if(mode==='song'){
         repaintSearch();let cursor=0;const tokens=norm(query).split(' ').filter(Boolean);
         await Promise.all(Array.from({length:3},async()=>{
@@ -489,7 +566,7 @@
     const s=meta.settings;
     const check=(key,title,sub)=>`<div class="smp-setting"><label for="smp-setting-${key}"><strong>${title}</strong><p>${sub}</p></label><input id="smp-setting-${key}" type="checkbox" data-setting="${key}"${s[key]?' checked':''} /></div>`;
     main.innerHTML=pageHead('A tu manera','Tu música y tus datos, bajo tu control.')+
-      `<section class="smp-settings-group"><h2>Tu experiencia</h2><div class="smp-setting"><label for="smp-theme"><strong>Color de acento</strong><p>El mismo universo, otro tono.</p></label><select id="smp-theme" data-setting="theme">${[['coral','Atardecer coral'],['violet','Noche violeta'],['mint','Menta suave']].map(([v,l])=>`<option value="${v}"${s.theme===v?' selected':''}>${l}</option>`).join('')}</select></div><div class="smp-setting"><label for="smp-quality"><strong>Calidad preferida</strong><p>Se aplica al próximo tema. Depende de los archivos disponibles.</p></label><select id="smp-quality" data-setting="quality">${[['balanced','Equilibrada'],['saver','Ahorrar datos'],['best','Máxima disponible']].map(([v,l])=>`<option value="${v}"${s.quality===v?' selected':''}>${l}</option>`).join('')}</select></div>${check('musicOnly','Priorizar música','Filtra audiolibros y podcasts identificados. Podés desactivarlo para ampliar la búsqueda.')}${check('remember','Recordar dónde quedaste','Guarda canción, cola y posición. La reproducción se retoma al tocar Play.')}${check('skipErrors','Saltar archivos que fallan','Prueba otra versión antes de avanzar. Se detiene después de tres canciones fallidas.')}</section>`+
+      `<section class="smp-settings-group"><h2>Tu experiencia</h2><div class="smp-setting"><label for="smp-theme"><strong>Color de acento</strong><p>El mismo universo, otro tono.</p></label><select id="smp-theme" data-setting="theme">${[['coral','Atardecer coral'],['violet','Noche violeta'],['mint','Menta suave']].map(([v,l])=>`<option value="${v}"${s.theme===v?' selected':''}>${l}</option>`).join('')}</select></div><div class="smp-setting"><label for="smp-quality"><strong>Calidad preferida</strong><p>Se aplica al próximo tema. Depende de los archivos disponibles.</p></label><select id="smp-quality" data-setting="quality">${[['balanced','Equilibrada'],['saver','Ahorrar datos'],['best','Máxima disponible']].map(([v,l])=>`<option value="${v}"${s.quality===v?' selected':''}>${l}</option>`).join('')}</select></div>${check('musicOnly','Priorizar música','Oculta podcasts, entrevistas y audiolibros identificados por sus metadatos. Podés desactivarlo para ampliar la búsqueda.')}${check('remember','Recordar dónde quedaste','Guarda canción, cola y posición. La reproducción se retoma al tocar Play.')}${check('skipErrors','Saltar archivos que fallan','Prueba otra versión antes de avanzar. Se detiene después de tres canciones fallidas.')}</section>`+
       `<section class="smp-settings-group"><h2>Tu biblioteca viaja con vos</h2><p class="smp-note">El respaldo incluye favoritos, playlists, historial, cola y ajustes. No incluye archivos de audio. Guardá una copia antes de cambiar de navegador, borrar sus datos o cambiar el dominio de tu blog.</p><div class="smp-actions">${btn('Exportar respaldo','export',{},'smp-button smp-primary','download')}${btn('Importar respaldo','import',{},'smp-button','upload')}</div><p class="smp-note">Podés combinar el respaldo con tu biblioteca actual o reemplazarla después de revisar su contenido.</p></section>`+
       `<section class="smp-settings-group"><h2>Almacenamiento y privacidad</h2><p class="smp-note">${db.mode==='indexedDB'?'Guardado local activo (IndexedDB).':db.mode==='localStorage'?'Guardado local alternativo activo; el espacio disponible es menor.':'El navegador bloqueó el guardado: exportá tus datos antes de cerrar.'} Tus datos musicales quedan en este navegador y dominio. Las búsquedas, portadas y audios se solicitan a Internet Archive, que recibe esas conexiones. No usamos analítica ni cuentas propias.</p><div class="smp-actions">${btn('Limpiar caché','cache-clear')}${btn('Restaurar ajustes','settings-reset')}${btn('Borrar todos mis datos','data-clear',{},'smp-button smp-danger','trash')}</div></section>`+
       `<section class="smp-settings-group"><h2>Sanavera MP3 ${VERSION}</h2><p class="smp-note">Creado por Sebastián Sanavera. La biblioteca es local; para reproducir necesitás conexión. La disponibilidad, licencias y metadatos de cada publicación dependen de Internet Archive. Consultá la página de origen antes de reutilizar un archivo.</p><p class="smp-note">En computadoras: espacio reproduce/pausa, ← y → retroceden o avanzan 10 segundos, y M silencia. Los controles de pantalla bloqueada dependen del navegador y de Android.</p><p class="smp-note">Para conservar la música en segundo plano, evitá cerrar esta pestaña. El sistema puede suspenderla para ahorrar batería.</p></section>`;
@@ -824,7 +901,7 @@
     }catch{toast('No hubo espacio para guardar el respaldo. Tu biblioteca anterior sigue intacta.');return;}
     if(replace){pausePlayer();player.token++;audio.removeAttribute('src');audio.load();player.queue=[];player.index=-1;}
     tracks=nextTracks;albums=nextAlbums;meta=nextMeta;dirtyTracks.clear();dirtyAlbums.clear();pendingImport=null;
-    if(replace){discovery={items:[],loading:false,error:''};searchState={query:'',mode:'all',sort:'relevance',page:0,total:0,items:[],trackIds:[],busy:false,error:'',scanned:0};$('#smp-search').value='';}
+    if(replace){discovery={items:[],loading:false,error:''};searchState=emptySearch();$('#smp-search').value='';}
     applySettings();if(replace){try{localStorage.removeItem(RESUME_KEY);}catch{}restorePlayer();}
     closeDialog();navigate('library');updateSidebar();updatePlayerUI();toast(replace?'Biblioteca restaurada.':'Respaldo combinado con tu biblioteca.');
   }
@@ -838,7 +915,7 @@
     player.queue=[];player.order=[];player.index=-1;player.position=0;player.pendingSeek=null;player.source=null;player.sleepAt=0;player.sleepEnd=false;
     // La clave genérica de la versión 1 no se borra: podría pertenecer a otra app del mismo blog.
     try{localStorage.removeItem(RESUME_KEY);localStorage.removeItem(FALLBACK_KEY);localStorage.setItem(LEGACY_DONE,'1');}catch{}
-    discovery={items:[],loading:false,error:''};searchState={query:'',mode:'all',sort:'relevance',page:0,total:0,items:[],trackIds:[],busy:false,error:'',scanned:0};
+    discovery={items:[],loading:false,error:''};searchState=emptySearch();
     applySettings();updatePlayerUI();updateSidebar();navigate('home');toast('Los datos de Sanavera MP3 2.0 fueron borrados.');
   }
   function applySettings(){
@@ -964,7 +1041,7 @@
       clearTimeout(debounceTimer);searchController?.abort();
       const q=$('#smp-search').value.trim();
       if(q.length>=2)debounceTimer=setTimeout(()=>runSearch(q),550);
-      else if(!q){searchState={...searchState,query:'',page:0,items:[],trackIds:[],total:0,busy:false,error:''};if(view.name==='search')renderSearch();}
+      else if(!q){searchState={...emptySearch(),mode:searchState.mode,sort:searchState.sort};if(view.name==='search')renderSearch();}
     });
     root.addEventListener('input',e=>{
       const el=e.target;
@@ -978,7 +1055,7 @@
       if(el.dataset.setting){
         const key=el.dataset.setting;meta.settings=settingsFrom({...meta.settings,[key]:el.type==='checkbox'?el.checked:el.value});applySettings();
         if(key==='remember'&&!meta.settings.remember){meta.resume=null;try{localStorage.removeItem(RESUME_KEY);}catch{}}
-        if(key==='musicOnly'){searchState.page=0;searchState.items=[];searchState.trackIds=[];discovery.items=[];}
+        if(key==='musicOnly'){searchController?.abort();clearTimeout(debounceTimer);searchState={...emptySearch(),query:searchState.query,mode:searchState.mode,sort:searchState.sort};discovery.items=[];}
         changed();updatePlayerUI();
       }
       if(el.id==='smp-import-file')importFile(el.files[0]);
