@@ -6,13 +6,21 @@
  */
 (() => {
   'use strict';
-  const VERSION = '2.0.2';
+  const VERSION = '2.0.3';
   const DB_NAME = 'sanavera-mp3-v2';
   const RESUME_KEY = 'smp.v2.resume';
   const FALLBACK_KEY = 'smp.v2.fallback';
   const LEGACY_DONE = 'smp.v2.legacy-migrated';
   const LIMIT = { tracks: 20000, albums: 10000, playlists: 500, playlist: 10000, history: 1500, queue: 3000, page: 24, importBytes: 20 * 1024 * 1024 };
-  const DEFAULTS = { theme:'coral', quality:'balanced', volume:0.8, muted:false, shuffle:false, repeat:'off', musicOnly:true, remember:true, skipErrors:true };
+  const EQ_DEFAULTS = Object.freeze({enabled:false,bass:0,mid:0,treble:0,boost:0});
+  const EQ_PRESETS = [
+    {id:'flat',name:'Equilibrado',bass:0,mid:0,treble:0},
+    {id:'cumbia',name:'Cumbia',bass:4,mid:-1,treble:2},
+    {id:'bass',name:'Más graves',bass:6,mid:-2,treble:0},
+    {id:'voice',name:'Voces',bass:-2,mid:4,treble:1},
+    {id:'bright',name:'Brillo',bass:-1,mid:0,treble:4}
+  ];
+  const DEFAULTS = { theme:'coral', quality:'balanced', volume:0.8, muted:false, shuffle:false, repeat:'off', musicOnly:true, remember:true, skipErrors:true, equalizer:EQ_DEFAULTS };
   const AUDIO = { mp3:'audio/mpeg', m4a:'audio/mp4', aac:'audio/aac', ogg:'audio/ogg; codecs="vorbis"', oga:'audio/ogg', opus:'audio/ogg; codecs="opus"', flac:'audio/flac', wav:'audio/wav', aiff:'audio/aiff', aif:'audio/aiff', alac:'audio/mp4', wma:'audio/x-ms-wma' };
   const ICONS = {
     home:'M3 10 12 3l9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z',
@@ -31,6 +39,7 @@
     volume:'m3 9 5 0 5-5v16l-5-5H3Zm14-1a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14',
     muted:'m3 9 5 0 5-5v16l-5-5H3Zm14 0 5 6m0-6-5 6',
     quality:'m13 2-9 12h7l-1 8 10-13h-7Z',
+    equalizer:'M5 3v7m0 4v7M12 3v11m0 4v3M19 3v3m0 4v11M2 10h6v4H2ZM9 14h6v4H9ZM16 6h6v4h-6Z',
     moon:'M21 13A9 9 0 0 1 11 3a9 9 0 1 0 10 10Z',
     more:'M5 12h.01M12 12h.01M19 12h.01',
     download:'M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4',
@@ -92,8 +101,14 @@
     if(!a || !validId(a.id)) return null;
     return {id:a.id,title:text(a.title,'Álbum sin título'),artist:text(a.artist,'Artista sin indicar'),year:text(a.year,'',20),cover:validFile(a.cover)&&/^(jpg|jpeg|png|webp)$/i.test(extOf(a.cover))?a.cover:'',description:text(a.description,'',8000),subjects:text(a.subjects,'',1000),downloads:clamp(a.downloads,0,1e12),trackIds:(Array.isArray(a.trackIds)?a.trackIds:[]).filter(s=>typeof s==='string'&&s.startsWith(a.id+'::')).slice(0,LIMIT.tracks),loadedAt:clamp(a.loadedAt,0,9e15),restricted:a.restricted===true};
   }
+  function equalizerFrom(eq) {
+    eq=eq&&typeof eq==='object'?eq:{};
+    const db=(v,min,max)=>Math.round(clamp(Number.isFinite(Number(v))?v:0,min,max)*2)/2;
+    return {enabled:eq.enabled===true,bass:db(eq.bass,-9,9),mid:db(eq.mid,-9,9),treble:db(eq.treble,-9,9),boost:db(eq.boost,0,6)};
+  }
   function settingsFrom(s={}) {
-    return {theme:['coral','violet','mint'].includes(s.theme)?s.theme:'coral',quality:['balanced','saver','best'].includes(s.quality)?s.quality:'balanced',volume:s.volume==null?.8:clamp(s.volume,0,1),muted:s.muted===true,shuffle:s.shuffle===true,repeat:['off','all','one'].includes(s.repeat)?s.repeat:'off',musicOnly:s.musicOnly!==false,remember:s.remember!==false,skipErrors:s.skipErrors!==false};
+    s=s&&typeof s==='object'?s:{};
+    return {theme:['coral','violet','mint'].includes(s.theme)?s.theme:'coral',quality:['balanced','saver','best'].includes(s.quality)?s.quality:'balanced',volume:s.volume==null?.8:clamp(s.volume,0,1),muted:s.muted===true,shuffle:s.shuffle===true,repeat:['off','all','one'].includes(s.repeat)?s.repeat:'off',musicOnly:s.musicOnly!==false,remember:s.remember!==false,skipErrors:s.skipErrors!==false,equalizer:equalizerFrom(s.equalizer)};
   }
   function emptyMeta() { return {version:2,updated:Date.now(),likes:[],albumLikes:[],playlists:[],history:[],recentAlbums:[],searches:[],seconds:0,plays:0,settings:{...DEFAULTS},resume:null}; }
   function cleanResume(r, tracks) {
@@ -193,6 +208,8 @@
   let discovery={items:[],loading:false,error:''},trackDisplayLimit=80,trackContext=[],queueDisplayLimit=80,libraryAlbumLimit=36,libraryPlaylistLimit=40;
   let player={queue:[],index:-1,order:[],cursor:0,source:null,token:0,wants:false,position:0,pendingSeek:null,attempted:new Set(),refreshed:false,failures:0,counted:false,heard:0,lastTime:0,lastWall:0,watchdog:0,error:'',sleepAt:0,sleepEnd:false};
   let toastTimer=0,lastResumeWrite=0,lastPositionUpdate=0,dialogAction=null,returnFocus=null,fullReturnFocus=null;
+  let audioListeners=null;
+  const sound={context:null,source:null,element:null,nodes:null,disabled:false,blocked:new Set(),notice:'',resumeTask:null,resumeTimer:0};
   const $=s=>root.querySelector(s);
   const $$=s=>[...root.querySelectorAll(s)];
   const currentTrack=()=>tracks.get(player.queue[player.index]);
@@ -676,6 +693,7 @@
     const s=meta.settings;
     const check=(key,title,sub)=>`<div class="smp-setting"><label for="smp-setting-${key}"><strong>${title}</strong><p>${sub}</p></label><input id="smp-setting-${key}" type="checkbox" data-setting="${key}"${s[key]?' checked':''} /></div>`;
     main.innerHTML=pageHead('A tu manera','Tu música y tus datos, bajo tu control.')+
+      `<section class="smp-settings-group"><h2>Tu sonido</h2><div class="smp-setting"><div><strong>Ecualizador y refuerzo</strong><p id="smp-eq-summary">${esc(equalizerStatus())}</p></div>${btn('Ajustar','equalizer',{},'smp-button','equalizer')}</div></section>`+
       `<section class="smp-settings-group"><h2>Tu experiencia</h2><div class="smp-setting"><label for="smp-theme"><strong>Color de acento</strong><p>El mismo universo, otro tono.</p></label><select id="smp-theme" data-setting="theme">${[['coral','Atardecer coral'],['violet','Noche violeta'],['mint','Menta suave']].map(([v,l])=>`<option value="${v}"${s.theme===v?' selected':''}>${l}</option>`).join('')}</select></div><div class="smp-setting"><label for="smp-quality"><strong>Calidad preferida</strong><p>Se aplica al próximo tema. Depende de los archivos disponibles.</p></label><select id="smp-quality" data-setting="quality">${[['balanced','Equilibrada'],['saver','Ahorrar datos'],['best','Máxima disponible']].map(([v,l])=>`<option value="${v}"${s.quality===v?' selected':''}>${l}</option>`).join('')}</select></div>${check('musicOnly','Priorizar música','Oculta podcasts, entrevistas y audiolibros identificados por sus metadatos. Podés desactivarlo para ampliar la búsqueda.')}${check('remember','Recordar dónde quedaste','Guarda canción, cola y posición. La reproducción se retoma al tocar Play.')}${check('skipErrors','Saltar archivos que fallan','Prueba otra versión antes de avanzar. Se detiene después de tres canciones fallidas.')}</section>`+
       `<section class="smp-settings-group"><h2>Tu biblioteca viaja con vos</h2><p class="smp-note">El respaldo incluye favoritos, playlists, historial, cola y ajustes. No incluye archivos de audio. Guardá una copia antes de cambiar de navegador, borrar sus datos o cambiar el dominio de tu blog.</p><div class="smp-actions">${btn('Exportar respaldo','export',{},'smp-button smp-primary','download')}${btn('Importar respaldo','import',{},'smp-button','upload')}</div><p class="smp-note">Podés combinar el respaldo con tu biblioteca actual o reemplazarla después de revisar su contenido.</p></section>`+
       `<section class="smp-settings-group"><h2>Almacenamiento y privacidad</h2><p class="smp-note">${db.mode==='indexedDB'?'Guardado local activo (IndexedDB).':db.mode==='localStorage'?'Guardado local alternativo activo; el espacio disponible es menor.':'El navegador bloqueó el guardado: exportá tus datos antes de cerrar.'} Tus datos musicales quedan en este navegador y dominio. Las búsquedas, portadas y audios se solicitan a Internet Archive, que recibe esas conexiones. No usamos analítica ni cuentas propias.</p><div class="smp-actions">${btn('Limpiar caché','cache-clear')}${btn('Restaurar ajustes','settings-reset')}${btn('Borrar todos mis datos','data-clear',{},'smp-button smp-danger','trash')}</div></section>`+
@@ -698,6 +716,190 @@
   }
 
   // Audio: un único elemento compartido por todas las pantallas y por Media Session.
+  // Ecualizador opcional. No decodifica ni descarga canciones completas en memoria.
+  // El elemento se pide con CORS antes de asignar src. Si ese modo falla, se intenta
+  // el mismo archivo con reproducción nativa, sin pasar audio opaco a Web Audio.
+  const audioContextClass=()=>window.AudioContext||window.webkitAudioContext;
+  const dbLabel=value=>`${value>0?'+':''}${Number(value).toLocaleString('es-AR')} dB`;
+  function createSoundGraph(ctx){
+    const bass=ctx.createBiquadFilter(),mid=ctx.createBiquadFilter(),treble=ctx.createBiquadFilter();
+    bass.type='lowshelf';bass.frequency.value=160;
+    mid.type='peaking';mid.frequency.value=1000;mid.Q.value=.8;
+    treble.type='highshelf';treble.frequency.value=4000;
+    const boost=ctx.createGain(),compressor=ctx.createDynamicsCompressor(),ceiling=ctx.createWaveShaper();
+    compressor.threshold.value=-3;compressor.knee.value=3;compressor.ratio.value=12;
+    compressor.attack.value=.003;compressor.release.value=.18;
+    // Techo suave de muestras: lineal hasta 0,85 y redondeado después. El compresor
+    // reduce los picos; este último tramo acota los que puedan superar su ataque.
+    const curve=new Float32Array(4097);
+    for(let i=0;i<curve.length;i++){
+      const x=i*2/(curve.length-1)-1,a=Math.abs(x),t=(a-.85)/.15;
+      curve[i]=a<=.85?x:Math.sign(x)*(.85+.15*(t-t*t/2));
+    }
+    ceiling.curve=curve;
+    const dry=ctx.createGain(),wet=ctx.createGain(),output=ctx.createGain();
+    dry.gain.value=1;wet.gain.value=0;
+    bass.connect(mid);mid.connect(treble);treble.connect(boost);boost.connect(compressor);
+    compressor.connect(ceiling);ceiling.connect(wet);wet.connect(output);dry.connect(output);output.connect(ctx.destination);
+    return {bass,mid,treble,boost,compressor,ceiling,dry,wet,output};
+  }
+  function smoothParam(param,value,ctx,immediate=false){
+    const now=ctx.currentTime;
+    if(immediate){param.cancelScheduledValues(now);param.setValueAtTime(value,now);return;}
+    if(param.cancelAndHoldAtTime)param.cancelAndHoldAtTime(now);
+    else{const current=param.value;param.cancelScheduledValues(now);param.setValueAtTime(current,now);}
+    param.linearRampToValueAtTime(value,now+.035);
+  }
+  function applyEqualizer(immediate=false){
+    const n=sound.nodes,ctx=sound.context,eq=meta.settings.equalizer;
+    if(!n||!ctx||ctx.state==='closed')return;
+    ['bass','mid','treble'].forEach(key=>smoothParam(n[key].gain,eq[key],ctx,immediate));
+    smoothParam(n.boost.gain,Math.pow(10,eq.boost/20),ctx,immediate);
+    // Un ajuste plano o apagado atraviesa una rama limpia, sin compresor ni techo.
+    const wet=eq.enabled&&[eq.bass,eq.mid,eq.treble,eq.boost].some(v=>v!==0);
+    smoothParam(n.dry.gain,wet?0:1,ctx,immediate);smoothParam(n.wet.gain,wet?1:0,ctx,immediate);
+  }
+  function disconnectSound(){
+    clearTimeout(sound.resumeTimer);sound.resumeTask=null;
+    try{sound.source?.disconnect();}catch{}
+    sound.source=null;sound.element=null;
+  }
+  function closeSound(){
+    disconnectSound();const ctx=sound.context;sound.context=null;
+    if(sound.nodes)Object.values(sound.nodes).forEach(node=>{try{node.disconnect();}catch{}});
+    sound.nodes=null;
+    if(ctx){ctx.onstatechange=null;try{ctx.close().catch(()=>{});}catch{}}
+  }
+  function replaceAudioElement(){
+    // Desconectar un MediaElementAudioSourceNode no devuelve su elemento a la
+    // salida nativa. Se necesita un elemento nuevo, con los mismos controles.
+    const old=audio;player.token++;audioListeners?.abort();disconnectSound();
+    old.pause();old.removeAttribute('src');old.load();
+    const fresh=document.createElement('audio');fresh.id='smp-audio';fresh.preload='metadata';fresh.setAttribute('playsinline','');
+    fresh.volume=meta.settings.volume;fresh.muted=meta.settings.muted;
+    old.replaceWith(fresh);audio=fresh;bindAudioEvents();
+  }
+  function rememberNativeFile(url){
+    if(!url)return;sound.blocked.add(url);
+    if(sound.blocked.size>128)sound.blocked.delete(sound.blocked.values().next().value);
+  }
+  function fallbackToNative(message,{fileOnly=false}={}){
+    const source=player.source,t=currentTrack(),url=audio.getAttribute('src');
+    const pos=player.pendingSeek??(audio.readyState?audio.currentTime:player.position),wants=player.wants;
+    if(fileOnly)rememberNativeFile(url);else sound.disabled=true;
+    sound.notice=message;
+    replaceAudioElement();
+    if(!fileOnly)closeSound();
+    if(source&&t)loadSource(source,pos,wants);else updateEqualizerUI();
+    if(meta.settings.equalizer.enabled)toast(message);
+  }
+  function wakeSound(restart=false){
+    const ctx=sound.context;
+    if(!ctx||sound.element!==audio||ctx.state==='running'){updateEqualizerUI();return;}
+    if(ctx.state==='closed'){fallbackToNative('El ecualizador se detuvo. Seguimos con el audio normal.');return;}
+    if(sound.resumeTask&&!restart){
+      // Un resume pendiente mientras estaba pausado también necesita un límite
+      // cuando se vuelve a tocar Play (la política de autoplay puede dejarlo pendiente).
+      if(player.wants){clearTimeout(sound.resumeTimer);sound.resumeTimer=setTimeout(()=>{
+        if(sound.context===ctx&&sound.element===audio&&ctx.state!=='running'&&player.wants)
+          fallbackToNative('El navegador pausó los efectos. Seguimos con el audio normal.');
+      },3500);}
+      return;
+    }
+    // resume() se invoca dentro del gesto del usuario; no se demora detrás de fetch.
+    let task;try{task=ctx.resume();}catch{fallbackToNative('No pudimos activar los efectos. Seguimos con el audio normal.');return;}
+    sound.resumeTask=task;
+    clearTimeout(sound.resumeTimer);
+    sound.resumeTimer=setTimeout(()=>{
+      if(sound.context===ctx&&sound.element===audio&&ctx.state!=='running'&&player.wants)
+        fallbackToNative('El navegador pausó los efectos. Seguimos con el audio normal.');
+    },3500);
+    Promise.resolve(task).then(()=>{
+      if(sound.context!==ctx||sound.resumeTask!==task)return;
+      sound.resumeTask=null;clearTimeout(sound.resumeTimer);updateEqualizerUI();
+    }).catch(()=>{
+      if(sound.context!==ctx||sound.resumeTask!==task)return;
+      sound.resumeTask=null;fallbackToNative('No pudimos activar los efectos. Seguimos con el audio normal.');
+    });
+  }
+  function prepareSound(){
+    if(sound.element===audio&&sound.source){applyEqualizer();wakeSound(true);return;}
+    if(!meta.settings.equalizer.enabled||sound.disabled||!audioContextClass()||audio.crossOrigin!=='anonymous')return;
+    try{
+      if(!sound.context){
+        const Context=audioContextClass();sound.context=new Context({latencyHint:'playback'});
+        sound.nodes=createSoundGraph(sound.context);
+        const ctx=sound.context;
+        ctx.onstatechange=()=>{
+          if(sound.context!==ctx)return;
+          updateEqualizerUI();
+          if(ctx.state==='running'){clearTimeout(sound.resumeTimer);return;}
+          if(player.wants&&sound.element===audio)wakeSound();
+        };
+      }
+      sound.source=sound.context.createMediaElementSource(audio);sound.element=audio;
+      sound.source.connect(sound.nodes.dry);sound.source.connect(sound.nodes.bass);
+      applyEqualizer(true);wakeSound(true);
+    }catch{fallbackToNative('Este navegador no pudo iniciar el ecualizador. El audio sigue en modo normal.');}
+  }
+  function equalizerStatus(){
+    const eq=meta.settings.equalizer;
+    if(!audioContextClass())return 'Este navegador no admite el ecualizador. Podés escuchar con el audio normal.';
+    if(!eq.enabled)return 'Sonido original · tus ajustes quedan guardados.';
+    if(sound.disabled)return sound.notice||'Efectos no disponibles en esta sesión. El audio sigue en modo normal.';
+    if(sound.blocked.has(audio.getAttribute('src')))return 'Este archivo se reproduce sin efectos. Los ajustes vuelven en el próximo compatible.';
+    if(sound.element===audio&&sound.context?.state==='running')return 'Activado · ajustá el sonido mientras escuchás.';
+    return currentTrack()?'Ajustes listos · tocá Play para escuchar.':'Ajustes listos · elegí una canción para escuchar.';
+  }
+  function updateEqualizerUI(){
+    if(!root||!meta)return;
+    const eq=meta.settings.equalizer,status=equalizerStatus();
+    const active=eq.enabled&&!sound.disabled&&!!audioContextClass()&&!sound.blocked.has(audio.getAttribute('src'));
+    $$('[data-action="equalizer"]').forEach(b=>{
+      b.classList.toggle('is-active',active);b.setAttribute('aria-label',`Abrir ecualizador${active?', activado':''}`);
+    });
+    const summary=$('#smp-eq-summary');if(summary&&summary.textContent!==status)summary.textContent=status;
+    const panel=$('#smp-equalizer');if(!panel)return;
+    const toggle=$('#smp-eq-enabled');toggle.checked=eq.enabled;toggle.disabled=!audioContextClass();
+    panel.dataset.enabled=String(eq.enabled);const statusNode=$('#smp-eq-status');if(statusNode.textContent!==status)statusNode.textContent=status;
+    const preset=EQ_PRESETS.find(p=>['bass','mid','treble'].every(key=>p[key]===eq[key]));
+    $('#smp-eq-preset-label').textContent=preset?.name||'Personalizado';
+    panel.querySelectorAll('[data-eq]').forEach(el=>{
+      const key=el.dataset.eq,value=eq[key];el.value=String(value);
+      el.disabled=!audioContextClass();
+      el.style.setProperty('--progress',((value-number(el.min))/(number(el.max)-number(el.min))*100)+'%');
+      el.setAttribute('aria-valuetext',dbLabel(value));$('#smp-eq-'+key+'-value').textContent=dbLabel(value);
+    });
+    panel.querySelectorAll('[data-action="eq-preset"]').forEach(b=>{const selected=b.dataset.preset===preset?.id;b.classList.toggle('is-active',selected);b.setAttribute('aria-pressed',String(selected));b.disabled=!audioContextClass();});
+    $('#smp-eq-retry').hidden=!(eq.enabled&&(sound.disabled||sound.blocked.has(audio.getAttribute('src'))));
+  }
+  function setEqualizer(patch,{retry=false}={}){
+    meta.settings.equalizer=equalizerFrom({...meta.settings.equalizer,...patch});
+    if(retry){
+      sound.disabled=false;sound.notice='';sound.blocked.delete(audio.getAttribute('src'));
+      if(currentTrack()&&player.source&&audio.crossOrigin!=='anonymous'){
+        const pos=player.pendingSeek??(audio.readyState?audio.currentTime:player.position);
+        loadSource(player.source,pos,player.wants||!audio.paused);
+      }
+    }
+    if(meta.settings.equalizer.enabled)prepareSound();else applyEqualizer();
+    changed();updateEqualizerUI();
+  }
+  function showEqualizer(){
+    const slider=(key,label,sub,min,max)=>`<div class="smp-eq-band"><div class="smp-eq-label"><label for="smp-eq-${key}"><strong>${label}</strong><small>${sub}</small></label><output id="smp-eq-${key}-value" for="smp-eq-${key}">0 dB</output></div><input id="smp-eq-${key}" type="range" data-eq="${key}" min="${min}" max="${max}" step="0.5" value="0" /><div class="smp-eq-scale" aria-hidden="true"><span>${min>0?'+':''}${min} dB</span><span>${min<0?'0 · neutro':'Sin refuerzo'}</span><span>+${max} dB</span></div></div>`;
+    showDialog('Tu sonido',`<section id="smp-equalizer" class="smp-equalizer"><div class="smp-eq-power"><span class="smp-eq-symbol">${icon('equalizer')}</span><label for="smp-eq-enabled"><strong>Ecualizador</strong><span id="smp-eq-preset-label">Equilibrado</span></label><input type="checkbox" role="switch" id="smp-eq-enabled" aria-describedby="smp-eq-status" /></div><p id="smp-eq-status" class="smp-eq-status" role="status"></p><div class="smp-eq-presets" aria-label="Ajustes de sonido">${EQ_PRESETS.map(p=>`<button type="button" class="smp-pill" data-action="eq-preset" data-preset="${p.id}" aria-pressed="false">${p.name}</button>`).join('')}</div><div class="smp-eq-bands">${slider('bass','Graves','Cuerpo y bajos',-9,9)}${slider('mid','Medios','Voces e instrumentos',-9,9)}${slider('treble','Agudos','Brillo y detalle',-9,9)}</div><div class="smp-eq-boost">${slider('boost','Refuerzo extra','Para grabaciones que suenan bajito',0,6)}<p>Control de picos incluido. Si suena áspero, bajá el refuerzo.</p></div><div class="smp-eq-actions">${btn('Restablecer','eq-reset',{},'smp-text-button','repeat')}${btn('Listo','dialog-close',{},'smp-button smp-primary','check')}</div><button type="button" id="smp-eq-retry" class="smp-button" data-action="eq-retry" hidden>Reintentar efectos</button><p class="smp-eq-footnote">Se guarda automáticamente. Apagalo para comparar con el sonido original.</p></section>`);
+    updateEqualizerUI();
+  }
+  function mountEqualizer(){
+    // Compatible con el HTML 2.0 existente: no hace falta volver a pegar la página.
+    const toolbar=$('.smp-player-tools');
+    if(toolbar&&!toolbar.querySelector('[data-action="equalizer"]')){
+      toolbar.insertAdjacentHTML('afterbegin',`<button type="button" data-action="equalizer" aria-haspopup="dialog">${icon('equalizer')}Ecualizador</button>`);
+      toolbar.classList.add('smp-player-tools-with-eq');
+    }
+    const extras=$('.smp-dock-extras');
+    if(extras&&!extras.querySelector('[data-action="equalizer"]'))extras.insertAdjacentHTML('afterbegin',`<button type="button" class="smp-icon-button smp-desktop-only" data-action="equalizer" aria-label="Abrir ecualizador" aria-haspopup="dialog">${icon('equalizer')}</button>`);
+  }
   function supported(s){return !!audio.canPlayType(AUDIO[s.ext]||'');}
   function sourceRank(s){
     const quality=meta.settings.quality, lossless=['flac','wav','aiff','aif','alac'].includes(s.ext);
@@ -733,16 +935,21 @@
     if(!restored)saveResume(true);
   }
   function loadSource(source,position=0,autoplay=player.wants){
+    const t=currentTrack();if(!t)return;
+    const url=mediaURL(t.albumId,source.name),cors=!!audioContextClass()&&!sound.disabled&&!sound.blocked.has(url);
+    if(!cors&&sound.element===audio)replaceAudioElement();
     clearTimeout(player.watchdog);player.token++;const token=player.token;
     audio.pause();player.source=source;player.attempted.add(source.name);player.wants=autoplay;player.pendingSeek=position;player.position=position;
     player.lastWall=0;player.lastTime=position;
-    audio.src=mediaURL(currentTrack().albumId,source.name);audio.preload='metadata';audio.load();
+    if(cors)audio.crossOrigin='anonymous';else audio.removeAttribute('crossorigin');
+    audio.src=url;audio.preload='metadata';audio.load();
     setStatus(autoplay?'Conectando con el audio…':'');updatePlayerUI();
     if(autoplay)requestPlay(token);
   }
   async function requestPlay(token=player.token){
     if(!currentTrack())return;
     player.wants=true;setStatus('Cargando audio…');startWatchdog();
+    prepareSound();if(token!==player.token)return;
     try{await audio.play();if(token!==player.token)return;setStatus('');}
     catch(e){
       if(token!==player.token||e.name==='AbortError')return;
@@ -770,6 +977,9 @@
     try{
       clearTimeout(player.watchdog);
       if(navigator.onLine===false){player.wants=false;audio.pause();setStatus('Sin conexión. Reconectate y tocá Play.');updatePlayerUI();return;}
+      if(audio.crossOrigin==='anonymous'&&audio.error&&audio.error.code!==3){
+        fallbackToNative('Este archivo no cargó con efectos. Probamos con el audio normal.',{fileOnly:true});return;
+      }
       let next=availableSources(t).find(s=>!player.attempted.has(s.name));
       if(next){loadSource(next,pos,wants);toast('Probando otra versión del audio…');return;}
       if(!player.refreshed){
@@ -854,6 +1064,7 @@
     $$('.smp-track').forEach(el=>el.classList.toggle('is-current',el.dataset.trackId===t?.id));
     if(navigator.mediaSession){try{navigator.mediaSession.playbackState=t?(playing?'playing':'paused'):'none';}catch{}}
     updateProgress();
+    updateEqualizerUI();
   }
   function updateMediaMetadata(){
     const t=currentTrack();if(!t||!('mediaSession'in navigator)||!('MediaMetadata'in window))return;
@@ -1030,6 +1241,7 @@
   }
   function applySettings(){
     root.dataset.theme=meta.settings.theme;audio.volume=meta.settings.volume;audio.muted=meta.settings.muted;
+    applyEqualizer();updateEqualizerUI();
   }
   async function migrateLegacy(){
     let old;try{if(localStorage.getItem(LEGACY_DONE))return;old=JSON.parse(localStorage.getItem('favorites')||'[]');}catch{return;}
@@ -1087,6 +1299,13 @@
       case 'player-open':openPlayer();break;
       case 'player-close':closePlayer();break;
       case 'quality':showQuality();break;
+      case 'equalizer':showEqualizer();break;
+      case 'eq-preset':{
+        const preset=EQ_PRESETS.find(p=>p.id===button.dataset.preset);
+        if(preset)setEqualizer({enabled:true,bass:preset.bass,mid:preset.mid,treble:preset.treble});break;
+      }
+      case 'eq-reset':setEqualizer(EQ_DEFAULTS);toast('Sonido original. Ecualizador y refuerzo restablecidos.');break;
+      case 'eq-retry':setEqualizer({enabled:true},{retry:true});break;
       case 'quality-select':{
         const source=currentTrack()?.sources[Number(index)];if(source&&supported(source)){const pos=player.pendingSeek??(audio.readyState?audio.currentTime:player.position);loadSource(source,pos,!audio.paused||player.wants);saveResume(true);closeDialog();}break;
       }
@@ -1137,6 +1356,27 @@
     if(navigator.onLine===false)persistentWarning('Estás sin conexión. Podés consultar tu biblioteca guardada; el audio necesita Internet.');
     else $('#smp-banner').hidden=true;
   }
+  function bindAudioEvents(){
+    audioListeners?.abort();audioListeners=new AbortController();
+    const element=audio,signal=audioListeners.signal;
+    const on=(event,handler)=>element.addEventListener(event,e=>{if(audio===element)handler(e);},{signal});
+    on('loadedmetadata',()=>{
+      if(player.pendingSeek!=null&&Number.isFinite(audio.duration)&&audio.duration>0){try{audio.currentTime=clamp(player.pendingSeek,0,Math.max(0,audio.duration-.05));player.position=audio.currentTime;player.lastTime=audio.currentTime;}catch{}player.pendingSeek=null;}
+      updateProgress();
+    });
+    on('durationchange',updateProgress);
+    on('timeupdate',onTimeUpdate);
+    on('playing',()=>{wakeSound();clearTimeout(player.watchdog);player.wants=true;player.lastWall=performance.now();player.lastTime=audio.currentTime;setStatus('');updatePlayerUI();});
+    on('pause',()=>{updatePlayerUI();saveResume(true);});
+    on('play',updatePlayerUI);
+    on('ended',()=>{if(player.heard>0)recordListen();nextTrack(true);});
+    on('waiting',()=>{if(player.wants){setStatus('Cargando un poco más de audio…');startWatchdog();}});
+    on('stalled',()=>{if(player.wants)startWatchdog();});
+    on('seeking',()=>{player.lastWall=0;});
+    on('seeked',()=>{player.lastTime=audio.currentTime;player.lastWall=performance.now();});
+    on('error',()=>{if(audio.getAttribute('src')&&audio.error?.code!==1)recoverSource();});
+    on('volumechange',updatePlayerUI);
+  }
   function bindEvents(){
     root.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(b&&root.contains(b)&&!b.disabled){Promise.resolve(action(b)).catch(err=>{console.warn('Sanavera MP3:',err);toast('No pudimos completar esa acción. Podés volver a intentar.');});}});
     root.addEventListener('submit',e=>{
@@ -1156,11 +1396,13 @@
     });
     root.addEventListener('input',e=>{
       const el=e.target;
+      if(['bass','mid','treble','boost'].includes(el.dataset.eq))setEqualizer({[el.dataset.eq]:el.value});
       if(el.matches('[data-volume]')){audio.volume=clamp(el.value,0,1);audio.muted=false;meta.settings.volume=audio.volume;meta.settings.muted=false;changed();updatePlayerUI();}
       if(el.matches('[data-seek]')){el.dataset.scrubbing='1';el.style.setProperty('--progress',number(el.value)/10+'%');const duration=audio.duration;if(Number.isFinite(duration))$$('[data-time="current"]').forEach(t=>t.textContent=fmt(duration*number(el.value)/1000));}
     });
     root.addEventListener('change',e=>{
       const el=e.target;
+      if(el.id==='smp-eq-enabled')setEqualizer({enabled:el.checked},{retry:el.checked&&sound.disabled});
       if(el.matches('[data-seek]')){delete el.dataset.scrubbing;seekTo(audio.duration*number(el.value)/1000);}
       if(el.id==='smp-search-sort'){runSearch($('#smp-search').value,{sort:el.value});}
       if(el.dataset.setting){
@@ -1178,26 +1420,11 @@
     },true);
     dialog.addEventListener('click',e=>{if(e.target===dialog){const rect=dialog.getBoundingClientRect();if(e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom)closeDialog();}});
     dialog.addEventListener('cancel',()=>{dialogAction=null;pendingImport=null;});
-    audio.addEventListener('loadedmetadata',()=>{
-      if(player.pendingSeek!=null&&Number.isFinite(audio.duration)&&audio.duration>0){try{audio.currentTime=clamp(player.pendingSeek,0,Math.max(0,audio.duration-.05));player.position=audio.currentTime;player.lastTime=audio.currentTime;}catch{}player.pendingSeek=null;}
-      updateProgress();
-    });
-    audio.addEventListener('durationchange',updateProgress);
-    audio.addEventListener('timeupdate',onTimeUpdate);
-    audio.addEventListener('playing',()=>{clearTimeout(player.watchdog);player.wants=true;player.lastWall=performance.now();player.lastTime=audio.currentTime;setStatus('');updatePlayerUI();});
-    audio.addEventListener('pause',()=>{updatePlayerUI();saveResume(true);});
-    audio.addEventListener('play',updatePlayerUI);
-    audio.addEventListener('ended',()=>{if(player.heard>0)recordListen();nextTrack(true);});
-    audio.addEventListener('waiting',()=>{if(player.wants){setStatus('Cargando un poco más de audio…');startWatchdog();}});
-    audio.addEventListener('stalled',()=>{if(player.wants)startWatchdog();});
-    audio.addEventListener('seeking',()=>{player.lastWall=0;});
-    audio.addEventListener('seeked',()=>{player.lastTime=audio.currentTime;player.lastWall=performance.now();});
-    audio.addEventListener('error',()=>{if(audio.getAttribute('src')&&audio.error?.code!==1)recoverSource();});
-    audio.addEventListener('volumechange',updatePlayerUI);
+    bindAudioEvents();
     window.addEventListener('online',()=>{updateConnectivity();toast('Volvió la conexión. Tocá Play para continuar.');});
     window.addEventListener('offline',updateConnectivity);
     window.addEventListener('pagehide',()=>{saveResume(true);flush();});
-    document.addEventListener('visibilitychange',()=>{if(document.hidden){saveResume(true);flush();}else checkSleep();});
+    document.addEventListener('visibilitychange',()=>{if(document.hidden){saveResume(true);flush();}else{checkSleep();if(player.wants)wakeSound();}});
     document.addEventListener('keydown',e=>{
       if(!root.isConnected||(!root.contains(e.target)&&root.dataset.fullscreen!=='true'))return;
       if(dialog.open)return;
@@ -1230,6 +1457,8 @@
     if(root.dataset.fullscreen==='true'){document.body.append(root);document.documentElement.classList.add('smp-lock');}
     if(!document.querySelector('meta[name="viewport"]')){const viewport=document.createElement('meta');viewport.name='viewport';viewport.content='width=device-width, initial-scale=1';document.head.append(viewport);}
     main=$('#smp-main');audio=$('#smp-audio');dialog=$('#smp-dialog');
+    if(audioContextClass())audio.crossOrigin='anonymous';
+    mountEqualizer();
     $$('[data-icon]').forEach(el=>{el.innerHTML=icon(el.dataset.icon);});
     try{
       db=new Database();const data=await db.open();
