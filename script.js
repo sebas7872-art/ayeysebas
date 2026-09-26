@@ -6,7 +6,7 @@
  */
 (() => {
   'use strict';
-  const VERSION = '2.0.1';
+  const VERSION = '2.0.2';
   const DB_NAME = 'sanavera-mp3-v2';
   const RESUME_KEY = 'smp.v2.resume';
   const FALLBACK_KEY = 'smp.v2.fallback';
@@ -188,7 +188,7 @@
   let tracks=new Map(),albums=new Map();
   let dirtyTracks=new Set(),dirtyAlbums=new Set(),saveTimer=0,saveChain=Promise.resolve(),storageFailed=false;
   let view={name:'home',id:null},viewSerial=0,albumController=null,searchController=null,debounceTimer=0,dataEpoch=0;
-  const emptySearch = () => ({query:'',mode:'all',sort:'relevance',page:0,total:0,items:[],trackIds:[],busy:false,error:'',scanned:0,cursor:null,hasMore:false,filtered:0,limitReached:false});
+  const emptySearch = () => ({query:'',mode:'all',sort:'relevance',page:0,total:0,items:[],trackIds:[],busy:false,error:'',scanned:0,cursor:null,hasMore:false,filtered:0,limitReached:false,mix:null});
   let searchState=emptySearch();
   let discovery={items:[],loading:false,error:''},trackDisplayLimit=80,trackContext=[],queueDisplayLimit=80,libraryAlbumLimit=36,libraryPlaylistLimit=40;
   let player={queue:[],index:-1,order:[],cursor:0,source:null,token:0,wants:false,position:0,pendingSeek:null,attempted:new Set(),refreshed:false,failures:0,counted:false,heard:0,lastTime:0,lastWall:0,watchdog:0,error:'',sleepAt:0,sleepEnd:false};
@@ -386,6 +386,104 @@
     list.forEach(rememberTrack);rememberAlbum(a);changed();return {album:a,tracks:list};
   }
 
+  // Canciones: una mezcla progresiva de los discos encontrados, no un filtro del
+  // nombre de las pistas. Sólo se consultan metadatos; los audios esperan al Play.
+  const SONG_BATCH_SIZE=5;
+  function createSongMix(previous,query,sort){
+    const reusable=previous&&!previous.busy&&previous.query===query&&previous.sort===sort&&['all','artist','album'].includes(previous.mode);
+    const continueCatalog=reusable&&previous.mode==='all'&&previous.page>0;
+    const mix={pending:[],retry:[],albumIds:new Set(),examined:new Set(),attempts:new Map(),pools:[],ready:[],seen:new Set(),recordings:new Map(),started:!!continueCatalog,done:continueCatalog?!previous.hasMore:false,cursor:continueCatalog?previous.cursor:null,skipped:0,capped:false};
+    if(reusable)for(const album of previous.items){if(!mix.albumIds.has(album.id)){mix.albumIds.add(album.id);mix.pending.push(album);}}
+    return mix;
+  }
+  function mixTracksFromAlbum(summary,loaded,query){
+    const q=norm(query), matches=value=>hasWords(norm(value),q), album=loaded.album;
+    const multiArtist=/\b(varios (?:artistas|interpretes)|various artists|artistas varios)\b/.test(norm([summary.title,summary.artist,album.title,album.artist]));
+    const artistMatch=[summary.artist,album.artist,...(summary.searchInfo?.artists||[])].some(matches);
+    const titleMatch=[summary.title,album.title].some(matches);
+    const wholeAlbum=!q||(!multiArtist&&(artistMatch||titleMatch));
+    return loaded.tracks.filter(t=>t.sources.some(supported)&&(wholeAlbum||matches(t.artist)));
+  }
+  async function mixLoadAlbum(summary,signal){
+    const controller=new AbortController(),abort=()=>controller.abort();
+    signal.addEventListener('abort',abort,{once:true});
+    const timer=setTimeout(abort,10000);
+    try{
+      if(signal.aborted)throw new DOMException('Cancelado','AbortError');
+      return await loadAlbum(summary.id,controller.signal);
+    }finally{clearTimeout(timer);signal.removeEventListener('abort',abort);}
+  }
+  function fillMixReady(mix,fresh=[]){
+    const order=[...fresh,...shuffleArray(mix.pools.filter(pool=>!fresh.includes(pool)))];
+    let advanced=true;
+    while(mix.ready.length<SONG_BATCH_SIZE&&advanced){
+      advanced=false;
+      for(const pool of order){
+        if(mix.ready.length>=SONG_BATCH_SIZE)break;
+        while(pool.position<pool.ids.length){
+          advanced=true;
+          const id=pool.ids[pool.position++],t=tracks.get(id);
+          if(!t||mix.seen.has(id))continue;
+          mix.seen.add(id);
+          const artist=norm(t.artist),title=norm(t.title);
+          // Conservar versiones distintas (en vivo, remix, etc.). Sólo deduplicar
+          // etiquetas iguales con duración prácticamente idéntica y autor conocido.
+          const identifiable=t.duration>0&&artist&&artist!=='artista sin indicar'&&title&&!/^(?:track|pista|audio|sin titulo)(?: \d+)?$/.test(title);
+          const key=artist+'::'+title,durations=mix.recordings.get(key)||[];
+          if(identifiable&&durations.some(d=>Math.abs(d-t.duration)<=1))continue;
+          if(identifiable){durations.push(t.duration);mix.recordings.set(key,durations);}
+          mix.ready.push(id);break;
+        }
+      }
+    }
+    mix.pools=mix.pools.filter(pool=>pool.position<pool.ids.length);
+  }
+  async function loadSongBatch(state,signal){
+    const mix=state.mix;let metadataRequests=0,catalogRequests=0;
+    // Los fallos transitorios se reintentan una vez en una acción posterior.
+    mix.pending.push(...mix.retry.splice(0));
+    while(mix.ready.length<SONG_BATCH_SIZE&&metadataRequests<6){
+      if(signal.aborted)throw new DOMException('Cancelado','AbortError');
+      if(!mix.pending.length){
+        if(mix.done||catalogRequests>=2)break;
+        try{
+          const result=await searchArchive(state.query,'all',1,state.sort,signal,mix.started?mix.cursor:null);
+          if(signal.aborted)throw new DOMException('Cancelado','AbortError');
+          catalogRequests++;mix.started=true;mix.cursor=result.next;mix.done=!result.next;
+          state.filtered+=result.filtered;state.limitReached||=result.limitReached;
+          for(const album of result.items){if(!mix.albumIds.has(album.id)){mix.albumIds.add(album.id);mix.pending.push(album);}}
+        }catch(e){if(signal.aborted)throw e;state.error=e.message;break;}
+        if(!mix.pending.length)continue;
+      }
+      const batch=mix.pending.splice(0,Math.min(3,6-metadataRequests));metadataRequests+=batch.length;
+      const results=await Promise.allSettled(batch.map(album=>mixLoadAlbum(album,signal)));
+      if(signal.aborted){mix.pending.unshift(...batch);throw new DOMException('Cancelado','AbortError');}
+      const fresh=[];
+      results.forEach((result,index)=>{
+        const summary=batch[index];mix.examined.add(summary.id);
+        if(result.status==='rejected'){
+          const attempts=(mix.attempts.get(summary.id)||0)+1;mix.attempts.set(summary.id,attempts);mix.skipped++;
+          if(attempts<2&&![403,404].includes(result.reason?.status))mix.retry.push(summary);
+          return;
+        }
+        const candidates=mixTracksFromAlbum(summary,result.value,state.query);
+        if(!candidates.length){mix.skipped++;return;}
+        const pool={albumId:summary.id,ids:shuffleArray(candidates.map(t=>t.id)),position:0};
+        mix.pools.push(pool);fresh.push(pool);
+        if(!state.items.some(a=>a.id===summary.id))state.items.push(result.value.album);
+      });
+      state.scanned=mix.examined.size;
+      fillMixReady(mix,fresh);
+    }
+    if(signal.aborted)throw new DOMException('Cancelado','AbortError');
+    fillMixReady(mix);
+    const room=Math.max(0,LIMIT.queue-state.trackIds.length);
+    state.trackIds.push(...mix.ready.splice(0,Math.min(SONG_BATCH_SIZE,room)));
+    mix.capped=state.trackIds.length>=LIMIT.queue;
+    state.hasMore=!mix.capped&&!!(mix.ready.length||mix.pools.length||mix.pending.length||mix.retry.length||!mix.done);
+    state.page++;trackDisplayLimit=Math.max(trackDisplayLimit,state.trackIds.length);
+  }
+
   // Interfaz: una sola raíz, delegación de eventos y listas renderizadas por tandas.
   const attrs=(o={})=>Object.entries(o).map(([k,v])=>` data-${k}="${esc(v)}"`).join('');
   const btn=(label,action,data={},kind='smp-button',symbol='')=>`<button type="button" class="${kind}" data-action="${action}"${attrs(data)}>${symbol?icon(symbol):''}${esc(label)}</button>`;
@@ -404,12 +502,12 @@
   function albumCards(list){
     return `<div class="smp-album-grid">${list.map(a=>`<article class="smp-album-card"><button type="button" class="smp-album-open" data-action="album" data-id="${esc(a.id)}" aria-label="Abrir ${esc(a.title)}">${cover(a)}<span class="smp-album-title">${esc(a.title)}</span><span class="smp-album-artist">${esc(a.artist)}${a.year?` · ${esc(a.year)}`:''}</span></button>${ibtn(meta.albumLikes.includes(a.id)?'Quitar álbum de favoritos':'Guardar álbum','album-like',{id:a.id},'heart',meta.albumLikes.includes(a.id))}</article>`).join('')}</div>`;
   }
-  function trackRows(ids,{limit=trackDisplayLimit,history=false,context=true}={}){
+  function trackRows(ids,{limit=trackDisplayLimit,history=false,context=true,showAlbum=false}={}){
     const valid=ids.filter(id=>tracks.has(id));if(context)trackContext=valid;
     const active=currentTrack()?.id;
     return `<div class="smp-track-list">${valid.slice(0,limit).map((id,index)=>{
       const t=tracks.get(id), liked=meta.likes.includes(id), current=active===id;
-      return `<div class="smp-track${current?' is-current':''}" data-track-id="${esc(id)}"><button type="button" class="smp-track-play" data-action="track-play" data-id="${esc(id)}" data-index="${index}" aria-label="Reproducir ${esc(t.title)}"><span class="smp-track-number">${current?icon('music'):String(index+1).padStart(2,'0')}</span>${cover(t)}<span class="smp-track-copy"><strong>${esc(t.title)}</strong><small>${esc(t.artist)}${history?' · '+esc(dateLabel(meta.history.find(h=>h.id===id)?.at||Date.now())):''}</small></span></button><span class="smp-track-duration">${t.duration?fmt(t.duration):'—'}</span><button type="button" class="smp-icon-button smp-track-like${liked?' is-active':''}" data-action="track-like" data-id="${esc(id)}" aria-label="${liked?'Quitar de':'Agregar a'} favoritos" aria-pressed="${liked}">${icon('heart')}</button>${ibtn('Opciones de '+t.title,'track-menu',{id},'more')}</div>`;
+      return `<div class="smp-track${current?' is-current':''}" data-track-id="${esc(id)}"><button type="button" class="smp-track-play" data-action="track-play" data-id="${esc(id)}" data-index="${index}" aria-label="Reproducir ${esc(t.title)}"><span class="smp-track-number">${current?icon('music'):String(index+1).padStart(2,'0')}</span>${cover(t)}<span class="smp-track-copy"><strong>${esc(t.title)}</strong><small>${esc(t.artist)}${showAlbum?' · '+esc(t.album):''}${history?' · '+esc(dateLabel(meta.history.find(h=>h.id===id)?.at||Date.now())):''}</small></span></button><span class="smp-track-duration">${t.duration?fmt(t.duration):'—'}</span><button type="button" class="smp-icon-button smp-track-like${liked?' is-active':''}" data-action="track-like" data-id="${esc(id)}" aria-label="${liked?'Quitar de':'Agregar a'} favoritos" aria-pressed="${liked}">${icon('heart')}</button>${ibtn('Opciones de '+t.title,'track-menu',{id},'more')}</div>`;
     }).join('')}</div>${valid.length>limit?`<div class="smp-load-more">${btn(`Mostrar más (${valid.length-limit})`,'tracks-more')}</div>`:''}`;
   }
   const genres=()=>`<div class="smp-genres">${[['Cumbia','Para levantar el día','cumbia'],['Rock argentino','Subí un poco el volumen','rock argentino'],['Jazz','Bajá un cambio','jazz'],['Electrónica','Encontrá tu frecuencia','electronic']].map(([title,sub,q])=>`<button type="button" class="smp-genre" data-action="quick-search" data-query="${q}"><strong>${title}</strong><small>${sub}</small>${icon('music')}</button>`).join('')}</div>`;
@@ -437,26 +535,39 @@
     catch(e){if(epoch===dataEpoch)discovery.error=e.message;}finally{if(epoch===dataEpoch){discovery.loading=false;if(view.name==='home'){const el=$('#smp-discovery');if(el)el.innerHTML=discovery.items.length?albumCards(discovery.items.slice(0,6)):empty('No pudimos traer novedades',discovery.error||'Probá una búsqueda por artista.',btn('Reintentar','discovery-retry'),'wifi');}}}
   }
   function searchFilters(){
-    return `<div class="smp-filterbar"><div class="smp-pills">${[['all','Todo'],['artist','Artistas'],['album','Álbumes'],['song','Canciones']].map(([mode,label])=>`<button type="button" class="smp-pill${searchState.mode===mode?' is-active':''}" data-action="search-mode" data-mode="${mode}" aria-pressed="${searchState.mode===mode}">${label}</button>`).join('')}</div><label><span class="smp-note">Orden: </span><select id="smp-search-sort" aria-label="Orden de resultados"><option value="relevance"${searchState.sort==='relevance'?' selected':''}>Relevancia</option><option value="downloads"${searchState.sort==='downloads'?' selected':''}>Más escuchados</option><option value="newest"${searchState.sort==='newest'?' selected':''}>Recién publicados</option></select></label></div>`;
+    return `<div class="smp-filterbar"><div class="smp-pills">${[['all','Todo'],['artist','Artistas'],['album','Álbumes'],['song','Canciones']].map(([mode,label])=>`<button type="button" class="smp-pill${searchState.mode===mode?' is-active':''}" data-action="search-mode" data-mode="${mode}" aria-pressed="${searchState.mode===mode}">${label}</button>`).join('')}</div><label><span class="smp-note">${searchState.mode==='song'?'Discos':'Orden'}: </span><select id="smp-search-sort" aria-label="Orden de resultados"><option value="relevance"${searchState.sort==='relevance'?' selected':''}>Relevancia</option><option value="downloads"${searchState.sort==='downloads'?' selected':''}>Más escuchados</option><option value="newest"${searchState.sort==='newest'?' selected':''}>Recién publicados</option></select></label></div>`;
   }
   function renderSearch(){
     const q=searchState.query;
-    main.innerHTML=pageHead(q?`Buscando «${q}»`:'Explorá a tu ritmo','Un artista, ese disco o una canción que no te podés sacar de la cabeza.')+searchFilters()+
+    main.innerHTML=pageHead(q?`Buscando «${q}»`:'Explorá a tu ritmo',searchState.mode==='song'?'Canciones de tus artistas y discos, mezcladas para vos.':'Un artista, ese disco o una canción que no te podés sacar de la cabeza.')+searchFilters()+
       (q&&searchState.mode==='all'?'<p class="smp-note">Primero el artista, después el título o álbum y luego la descripción. El orden elegido se aplica dentro de cada grupo. Los resultados secundarios aparecen al final.</p>':'')+
-      (searchState.mode==='song'?'<p class="smp-note">Buscamos publicaciones relacionadas y revisamos los títulos de sus pistas. Archive no tiene un índice completo de canciones: si no aparece, probá con el artista o el álbum.</p>':'')+
+      (searchState.mode==='song'?'<p class="smp-note">Buscá un artista o un álbum. Mezclamos sus canciones de a cinco, combinando distintos discos. Tocá «Ver 5 más» para ampliar la selección.</p>':'')+
       `<div id="smp-search-results">${searchResultsHTML()}</div>`;
+  }
+  function songResultsHTML(){
+    const s=searchState,mix=s.mix;
+    let html=`<div class="smp-results-meta"><span>${s.trackIds.length} canciones · ${s.scanned} álbumes revisados</span><span>${meta.settings.musicOnly?'Filtro musical activo':'Todo el audio'}</span></div>`;
+    if(s.error)html+=empty('No pudimos completar esta tanda',s.error,btn('Reintentar','search-retry'),'wifi');
+    if(s.trackIds.length)html+=sectionHead('Tu selección',`${new Set(s.trackIds.map(id=>tracks.get(id)?.albumId)).size} discos en la mezcla`,btn('Escuchar','song-mix-play',{},'smp-button smp-primary','play'))+trackRows(s.trackIds,{showAlbum:true});
+    else if(!s.busy&&!s.error)html+=empty(s.hasMore?'Seguimos buscando temas':'No encontramos canciones para esta selección',s.hasMore?'Estos álbumes no aportaron canciones reproducibles relacionadas con tu búsqueda. Probá con los siguientes.':'Probá con el nombre del artista o de uno de sus discos.',s.hasMore?'':btn('Buscar otra cosa','focus-search'),'music');
+    if(s.busy)html+='<div class="smp-boot" style="padding:24px" role="status"><span class="smp-spinner"></span><p>Armando tu mezcla…</p></div>';
+    else if(s.hasMore)html+=`<div class="smp-load-more">${btn('Ver 5 más','search-more',{},'smp-button','plus')}</div>`;
+    else if(s.trackIds.length)html+=`<p class="smp-note">${mix?.capped?'Esta selección llegó a 3.000 canciones. Podés afinar la búsqueda para armar otra.':'Llegaste al final de los temas disponibles en los álbumes revisados.'}</p>`;
+    if(mix?.skipped&&!s.busy)html+='<p class="smp-note">Se omitieron álbumes que no respondieron o no aportaron canciones reproducibles para esta búsqueda.</p>';
+    if(s.limitReached)html+='<p class="smp-note">Archive limitó los resultados de algún grupo. Afiná la búsqueda para explorar más discos.</p>';
+    return html;
   }
   function searchResultsHTML(){
     const s=searchState, hasQuery=s.page>0||s.busy||s.error;
     if(!hasQuery){return `${meta.searches.length?sectionHead('Tus últimas búsquedas')+`<div class="smp-pills">${meta.searches.map(q=>btn(q,'quick-search',{query:q},'smp-pill','history')).join('')}</div>`:''}${sectionHead('Elegí por dónde empezar')}${genres()}${sectionHead('También podés abrir un álbum')}<form id="smp-open-archive" class="smp-searchbar"><span data-icon="disc">${icon('disc')}</span><input name="archive" type="text" placeholder="Pegá un enlace de archive.org/details/…" aria-label="Enlace o identificador de Archive" maxlength="500" /><button type="submit" class="smp-icon-button" aria-label="Abrir enlace">${icon('arrow')}</button></form>`;}
+    if(s.mode==='song')return songResultsHTML();
     if(s.busy&&!s.items.length)return skeleton();
     let html=`<div class="smp-results-meta"><span>${s.items.length.toLocaleString('es-AR')} publicaciones mostradas${s.mode==='song'?` · ${s.scanned} revisadas`:''}${s.filtered?` · ${s.filtered} descartadas`:''}</span><span>${meta.settings.musicOnly?'Filtro musical activo':'Todo el audio'}</span></div>`;
     if(s.error)html+=empty('No pudimos completar la búsqueda',s.error,btn('Reintentar','search-retry'),'wifi');
-    if(s.mode==='song'&&s.trackIds.length)html+=sectionHead('Canciones encontradas')+trackRows(s.trackIds);
     if(s.items.length){
       if(s.mode==='all'&&lucene(s.query)){
         SEARCH_GROUPS.forEach((label,index)=>{const items=s.items.filter(a=>a.searchGroup===index);if(items.length)html+=sectionHead(label,index===4?'Publicaciones con datos incompletos, enganchados y otras coincidencias de menor prioridad.':'')+albumCards(items);});
-      }else html+=(s.mode==='song'?sectionHead('Publicaciones relacionadas',s.trackIds.length?'Podés explorar el resto de las pistas.':'No encontramos ese título entre las pistas revisadas. Mirá estas publicaciones.'):'')+albumCards(s.items);
+      }else html+=albumCards(s.items);
     }else if(!s.busy&&!s.error)html+=empty(s.hasMore?'Seguimos buscando música':'Por acá todavía no suena nada',s.hasMore?'Esta tanda no tenía audio musical identificable. Podés revisar las siguientes coincidencias.':'Probá menos palabras, otro artista o desactivá el filtro musical en Ajustes.',s.hasMore?'':btn('Buscar otra cosa','focus-search'),'search');
     if(s.busy)html+='<div class="smp-boot" style="padding:24px"><span class="smp-spinner"></span><p>Buscando música…</p></div>';
     else if(s.hasMore)html+=`<div class="smp-load-more">${btn('Cargar más resultados','search-more',{},'smp-button','down')}</div>`;
@@ -464,33 +575,32 @@
     return html;
   }
   function repaintSearch(){if(view.name==='search'){const el=$('#smp-search-results');if(el)el.innerHTML=searchResultsHTML();}}
-  async function runSearch(query,{more=false}={}){
+  async function runSearch(query,{more=false,mode:requestedMode,sort:requestedSort}={}){
     clearTimeout(debounceTimer);query=text(query,'',160);
     if(more&&(searchState.busy||!searchState.hasMore))return;
     searchController?.abort();const controller=new AbortController();searchController=controller;
-    if(!more){searchState={...emptySearch(),mode:searchState.mode,sort:searchState.sort,query};trackDisplayLimit=80;}
+    if(!more){
+      const previous=searchState,mode=['all','artist','album','song'].includes(requestedMode)?requestedMode:previous.mode,sort=['relevance','newest','downloads'].includes(requestedSort)?requestedSort:previous.sort;
+      searchState={...emptySearch(),mode,sort,query};
+      if(mode==='song'){searchState.mix=createSongMix(previous,query,sort);searchState.hasMore=true;}
+      trackDisplayLimit=80;
+    }
     const page=searchState.page+1, mode=searchState.mode, sort=searchState.sort;
     searchState.busy=true;searchState.error='';
     if(view.name!=='search')navigate('search');else if(!more)renderSearch();else repaintSearch();
     if(query&&!more){meta.searches=unique([query,...meta.searches]).slice(0,10);changed();}
     try{
+      if(mode==='song'){
+        const state=searchState;await loadSongBatch(state,controller.signal);
+        if(!controller.signal.aborted&&state===searchState)changed();
+        return;
+      }
       const result=await searchArchive(query,mode,page,sort,controller.signal,more?searchState.cursor:null);
       if(controller.signal.aborted)return;
       searchState.page=page;searchState.total=result.total;searchState.cursor=result.next;searchState.hasMore=!!result.next;searchState.filtered+=result.filtered;searchState.limitReached||=result.limitReached;
       const known=new Set(searchState.items.map(a=>a.id));
       for(const a of result.items){if(!known.has(a.id)){searchState.items.push(a);known.add(a.id);}if(!albums.has(a.id))rememberAlbum(a);}
       searchState.items.sort((a,b)=>compareResults(a,b,query,mode,sort));
-      if(mode==='song'){
-        repaintSearch();let cursor=0;const tokens=norm(query).split(' ').filter(Boolean);
-        await Promise.all(Array.from({length:3},async()=>{
-          while(cursor<result.items.length&&!controller.signal.aborted){
-            const item=result.items[cursor++];
-            try{const loaded=await loadAlbum(item.id,controller.signal);for(const t of loaded.tracks){if(tokens.length&&tokens.every(term=>norm(t.title).includes(term))&&!searchState.trackIds.includes(t.id))searchState.trackIds.push(t.id);}}
-            catch(e){if(e.name==='AbortError')return;}
-            if(!controller.signal.aborted){searchState.scanned++;}
-          }
-        }));
-      }
       if(controller.signal.aborted)return;
       changed();
     }catch(e){if(e.name!=='AbortError'&&!controller.signal.aborted)searchState.error=e.message;}
@@ -944,10 +1054,11 @@
       case 'navigate': navigate(button.dataset.view);break;
       case 'back': navigate(backView.name,backView.id);break;
       case 'focus-search': $('#smp-search').focus();$('#smp-search').select();break;
-      case 'quick-search': searchState.mode=button.dataset.mode||'all';$('#smp-search').value=button.dataset.query||'';runSearch(button.dataset.query||'');break;
-      case 'search-mode': searchState.mode=button.dataset.mode;if(searchState.page||$('#smp-search').value.trim())runSearch($('#smp-search').value);else renderSearch();break;
+      case 'quick-search': $('#smp-search').value=button.dataset.query||'';runSearch(button.dataset.query||'',{mode:button.dataset.mode||'all'});break;
+      case 'search-mode': if(searchState.page||$('#smp-search').value.trim())runSearch($('#smp-search').value,{mode:button.dataset.mode});else{searchState.mode=button.dataset.mode;renderSearch();}break;
       case 'search-more':runSearch(searchState.query,{more:true});break;
       case 'search-retry':runSearch(searchState.query,{more:searchState.page>0});break;
+      case 'song-mix-play':playQueue(searchState.trackIds);break;
       case 'discovery-retry': discovery.items=[];discover(true);const block=$('#smp-discovery');if(block)block.innerHTML=skeleton();break;
       case 'album':navigate('album',id);break;
       case 'album-refresh':if(validId(id))renderAlbum(id,true);break;
@@ -1051,7 +1162,7 @@
     root.addEventListener('change',e=>{
       const el=e.target;
       if(el.matches('[data-seek]')){delete el.dataset.scrubbing;seekTo(audio.duration*number(el.value)/1000);}
-      if(el.id==='smp-search-sort'){searchState.sort=el.value;runSearch($('#smp-search').value);}
+      if(el.id==='smp-search-sort'){runSearch($('#smp-search').value,{sort:el.value});}
       if(el.dataset.setting){
         const key=el.dataset.setting;meta.settings=settingsFrom({...meta.settings,[key]:el.type==='checkbox'?el.checked:el.value});applySettings();
         if(key==='remember'&&!meta.settings.remember){meta.resume=null;try{localStorage.removeItem(RESUME_KEY);}catch{}}
