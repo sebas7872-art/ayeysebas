@@ -6,7 +6,7 @@
  */
 (() => {
   'use strict';
-  const VERSION = '2.0.6';
+  const VERSION = '2.0.7';
   const DB_NAME = 'sanavera-mp3-v2';
   const RESUME_KEY = 'smp.v2.resume';
   const FALLBACK_KEY = 'smp.v2.fallback';
@@ -378,10 +378,50 @@
     }
     return [...candidates.values()].sort((a,b)=>a.edits-b.edits||b.ids.size-a.ids.size||b.artists.size-a.artists.size||b.quality-a.quality||a.key.localeCompare(b.key)).slice(0,3).map(c=>({query:c.query,edits:c.edits,support:c.ids.size,artists:c.artists.size,quality:c.quality}));
   }
-  async function findSearchCorrection(query,mode,signal){
-    const musicOnly=meta.settings.musicOnly,q=spellingQuery(query,mode,musicOnly);
-    if(!q)return {suggestions:[],automatic:''};
-    const key=`spelling:2.0.6:${norm(query)}:${mode==='song'?'all':mode}:${musicOnly}`;
+  // Completar un nombre no es corregir letras: sólo la última palabra puede
+  // quedar cortada y las anteriores deben coincidir, juntas y en ese orden.
+  // El mínimo de cuatro letras evita consultas tan abiertas como «Los pa».
+  function completionWords(query){
+    const words=spellingWords(query),last=words.at(-1);
+    return last&&/^[a-z]{4,}$/.test(last)?words:[];
+  }
+  function completionQuery(query,mode,musicOnly){
+    const words=completionWords(query);if(!words.length)return '';
+    const terms=words.map((w,i)=>i===words.length-1?`${w}*`:`"${w}"`).join(' AND ');
+    const fields=mode==='artist'?['creator','artist']:mode==='album'?['title']:['creator','artist','title'];
+    return `(${fields.map(f=>`${f}:(${terms})`).join(' OR ')}) AND (mediatype:audio OR mediatype:etree) AND NOT access-restricted-item:true AND NOT ${SECONDARY_QUERY}${musicOnly?` AND NOT ${SPOKEN_QUERY}`:''}`;
+  }
+  function completionCandidates(query,items,mode){
+    const wanted=completionWords(query),candidates=new Map();if(!wanted.length)return [];
+    const article=/^(?:el|la|los|las|the)$/;
+    for(const item of items){
+      if(!visibleAlbum(item)||item.searchInfo?.spoken||/^eng(?:anchados)? artista\b/.test(norm(item.title)))continue;
+      const fields=[];
+      if(mode!=='album')for(const label of item.searchInfo?.artists||[item.artist])fields.push({label,artist:true});
+      if(mode!=='artist'){
+        // Muchos discos tienen al sello en creator: admitir «Artista - Disco».
+        // No extraer nombres de descripciones ni de palabras sueltas del título.
+        const segments=text(item.title,'',600).split(/\s+[-–—]\s+/);
+        if(/^(?:19|20)\d{2}$/.test(segments[0]))segments.shift();
+        if(segments.length>1)fields.push({label:segments[0],artist:false});
+      }
+      for(const {label:raw,artist} of fields){
+        const label=text(raw).trim(),key=norm(label),parts=key.split(' ');
+        if(!key||label.length>120||parts.length>8||/[;,|@\n]|:\/\//.test(label)||/^(?:varios(?: artistas| interpretes)?|various(?: artists)?|artista sin indicar|unknown|desconocido|anonimo)$/.test(key))continue;
+        const offset=article.test(parts[0])&&!article.test(wanted[0])?1:0,available=parts.slice(offset);
+        if(available.length<wanted.length||available.length>wanted.length+3)continue;
+        if(!wanted.slice(0,-1).every((w,i)=>w===available[i]))continue;
+        const last=available[wanted.length-1];
+        if(!last.startsWith(wanted.at(-1))||last===wanted.at(-1))continue;
+        let candidate=candidates.get(key);
+        if(!candidate){candidate={query:label,key,ids:new Set(),artists:new Set()};candidates.set(key,candidate);}
+        candidate.ids.add(item.id);if(artist)candidate.artists.add(item.id);
+      }
+    }
+    return [...candidates.values()].sort((a,b)=>b.ids.size-a.ids.size||b.artists.size-a.artists.size||a.key.localeCompare(b.key)).slice(0,3).map(c=>({query:c.query,support:c.ids.size,artists:c.artists.size}));
+  }
+  async function nameCandidates(q,key,musicOnly,signal){
+    if(!q)return [];
     let items=await db.cached(key,30*60*1000);
     if(signal.aborted)throw new DOMException('Cancelado','AbortError');
     if(!Array.isArray(items)){
@@ -394,11 +434,47 @@
       await db.cachePut(key,items);
     }
     if(signal.aborted)throw new DOMException('Cancelado','AbortError');
+    return items;
+  }
+  async function findSpellingCorrection(query,mode,signal){
+    const musicOnly=meta.settings.musicOnly,q=spellingQuery(query,mode,musicOnly);
+    if(!q)return {suggestions:[],automatic:''};
+    const key=`spelling:2.0.6:${norm(query)}:${mode==='song'?'all':mode}:${musicOnly}`;
+    const items=await nameCandidates(q,key,musicOnly,signal);
     const suggestions=spellingCandidates(query,items,mode),[first,second]=suggestions,words=spellingWords(query);
     const supported=first&&(first.artists>0||first.quality>=2||first.support>=2);
     const unambiguous=first&&(!second||first.edits<second.edits||(first.support>=3&&first.support>=second.support*3));
     const automatic=supported&&unambiguous&&(words.length>1||words[0].length>=6)?first.query:'';
     return {suggestions:suggestions.map(c=>c.query),automatic};
+  }
+  async function findNameCompletion(query,mode,signal){
+    const musicOnly=meta.settings.musicOnly,q=completionQuery(query,mode,musicOnly);
+    if(!q)return {suggestions:[],automatic:''};
+    const key=`completion:2.0.7:${norm(query)}:${mode==='song'?'all':mode}:${musicOnly}`;
+    const items=await nameCandidates(q,key,musicOnly,signal);
+    const suggestions=completionCandidates(query,items,mode),[first,second]=suggestions,words=completionWords(query);
+    const supported=first&&(first.artists>0||first.support>=2);
+    const unambiguous=first&&(!second||(first.support>=4&&first.support>=second.support*4));
+    const automatic=supported&&unambiguous&&(words.length>1||words[0].length>=6)?first.query:'';
+    return {suggestions:suggestions.map(c=>c.query),automatic};
+  }
+  async function findSearchCorrection(query,mode,signal){
+    // Dos consultas pequeñas, independientes y cancelables. Un fallo del
+    // complemento nuevo no inutiliza las correcciones que ya funcionaban.
+    const results=await Promise.allSettled([findSpellingCorrection(query,mode,signal),findNameCompletion(query,mode,signal)]);
+    if(signal.aborted)throw new DOMException('Cancelado','AbortError');
+    const [spelling,completion]=results.map(r=>r.status==='fulfilled'?r.value:{suggestions:[],automatic:''});
+    const options=new Map();
+    // Reservar lugar para ambas vías cuando sus primeras opciones difieren.
+    const names=[completion.suggestions[0],spelling.automatic||spelling.suggestions[0],...completion.suggestions,...spelling.suggestions];
+    for(const name of names)if(name&&!options.has(norm(name)))options.set(norm(name),name);
+    let automatic='';
+    if(completion.automatic&&(!spelling.automatic||norm(completion.automatic)===norm(spelling.automatic)))automatic=completion.automatic;
+    else if(spelling.automatic&&(!completion.suggestions.length||completion.suggestions.every(n=>norm(n)===norm(spelling.automatic))))automatic=spelling.automatic;
+    // Si el prefijo y la errata apuntan a artistas distintos, dejar elegir.
+    const failure=results.find(r=>r.status==='rejected');
+    if(failure&&!options.size)throw failure.reason;
+    return {suggestions:[...options.values()].slice(0,3),automatic};
   }
   function relevance(a,q,mode='all'){
     const n=norm(q);if(!n)return 0;
@@ -413,14 +489,19 @@
     if(sort==='downloads')return b.downloads-a.downloads||a.id.localeCompare(b.id);
     return relevance(b,query,mode)-relevance(a,query,mode)||b.downloads-a.downloads||a.id.localeCompare(b.id);
   }
+  function literalSearchName(doc,query,mode){
+    const artists=[...(Array.isArray(doc.creator)?doc.creator:[doc.creator]),...(Array.isArray(doc.artist)?doc.artist:[doc.artist])];
+    const names=mode==='artist'?artists:mode==='album'?[doc.title,doc.album]:[...artists,doc.title,doc.album];
+    return names.some(name=>hasPhrase(norm(text(name)),norm(query)));
+  }
   async function searchArchive(query,mode,page,sort,signal,cursor=null){
     const musicOnly=meta.settings.musicOnly, groups=searchGroups(query,mode,musicOnly), rows=mode==='song'?12:LIMIT.page;
-    let position=cursor?{...cursor}:{group:0,page:1}, filtered=0,limitReached=false,total=0,matched=0,primaryMatched=0;
+    let position=cursor?{...cursor}:{group:0,page:1}, filtered=0,limitReached=false,total=0,matched=0,primaryMatched=0,literalMatched=false;
     // Avanzar por grupos vacíos, con un límite por acción para no bombardear Archive.
     for(let attempt=0;attempt<5&&position.group<groups.length;attempt++){
       if(signal?.aborted)throw new DOMException('Cancelado','AbortError');
       const group=groups[position.group];
-      const key=`search:2.0.1:${query}:${mode}:${position.group}:${position.page}:${sort}:${musicOnly}`;
+      const key=`search:2.0.7:${query}:${mode}:${position.group}:${position.page}:${sort}:${musicOnly}`;
       let result=await db.cached(key,30*60*1000);
       if(signal?.aborted)throw new DOMException('Cancelado','AbortError');
       if(!result){
@@ -434,33 +515,37 @@
         const data=await requestJSON(`https://archive.org/advancedsearch.php?${params}`,signal);
         if(!data.response||!Array.isArray(data.response.docs))throw new Error('Archive cambió su respuesta de búsqueda. Probá nuevamente más tarde.');
         const items=data.response.docs.map(d=>searchDoc(d,musicOnly)).filter(Boolean);
-        result={items,total:clamp(data.response.numFound,0,1e10),rawCount:data.response.docs.length,filtered:data.response.docs.length-items.length};
+        // Medir también antes de ocultar o descartar archivos: un acierto literal
+        // que el usuario ocultó no debe disparar la expansión de otro artista.
+        result={items,total:clamp(data.response.numFound,0,1e10),rawCount:data.response.docs.length,filtered:data.response.docs.length-items.length,literalMatched:data.response.docs.some(d=>d&&literalSearchName(d,query,mode))};
         if(signal?.aborted)throw new DOMException('Cancelado','AbortError');
         await db.cachePut(key,result);
       }
-      total=result.total;filtered+=result.filtered;matched+=result.rawCount;if(group.group<2)primaryMatched+=result.rawCount;
+      total=result.total;filtered+=result.filtered;matched+=result.rawCount;if(group.group<2){primaryMatched+=result.rawCount;literalMatched||=result.literalMatched;}
       const offset=position.page*rows;
       if(offset>=10000&&offset<total)limitReached=true;
       position=offset>=Math.min(total,10000)||!result.rawCount?{group:position.group+1,page:1}:{group:position.group,page:position.page+1};
       const eligible=result.items.filter(visibleAlbum);filtered+=result.items.length-eligible.length;
       const items=eligible.map(a=>({...a,searchGroup:group.group})).sort((a,b)=>compareResults(a,b,query,mode,sort));
-      if(items.length||position.group>=groups.length)return {items,total,filtered,matched,primaryMatched,limitReached,next:position.group<groups.length?position:null};
+      if(items.length||position.group>=groups.length)return {items,total,filtered,matched,primaryMatched,literalMatched,limitReached,next:position.group<groups.length?position:null};
     }
-    return {items:[],total,filtered,matched,primaryMatched,limitReached,next:position.group<groups.length?position:null};
+    return {items:[],total,filtered,matched,primaryMatched,literalMatched,limitReached,next:position.group<groups.length?position:null};
   }
   async function searchForState(state,mode,signal,cursor=null){
     let result=await searchArchive(state.effectiveQuery,mode,state.page+1,state.sort,signal,cursor);
     if(signal.aborted)throw new DOMException('Cancelado','AbortError');
     const empty=!state.hadMatches&&!result.matched&&!result.next;
     const secondary=mode==='all'&&result.items.length>0&&result.items.every(a=>a.searchGroup>=2);
-    // Una errata puede existir en la descripción de un recopilatorio. Eso no
-    // debe bloquear el hallazgo del artista correcto. Los aciertos en artista
-    // o título, incluso ocultos o filtrados, siempre conservan prioridad.
-    if(!state.exact&&!state.correctionChecked&&!state.primaryMatches&&!result.primaryMatched&&!state.trackIds.length&&(empty||secondary)){
+    // Mantener la condición del corrector anterior. El prefijo también puede
+    // ayudar cuando Archive sólo unió palabras dispersas (palm ... de los ...),
+    // pero nunca desplaza un nombre o título que contiene la frase literal.
+    const spellingEligible=!result.primaryMatched&&(empty||secondary);
+    const completionEligible=result.items.length>0&&result.primaryMatched>0&&!result.literalMatched&&completionWords(state.query).length>0;
+    if(!state.exact&&!state.correctionChecked&&!state.primaryMatches&&!state.trackIds.length&&(spellingEligible||completionEligible)){
       state.correctionChecked=true;state.correcting=true;repaintSearch();
       const original=result,originalQuery=state.effectiveQuery;
       try{
-        const correction=await findSearchCorrection(state.query,state.mode,signal);
+        const correction=await (spellingEligible?findSearchCorrection:findNameCompletion)(state.query,state.mode,signal);
         if(signal.aborted)throw new DOMException('Cancelado','AbortError');
         state.correcting=false;state.suggestions=correction.suggestions;
         if(correction.automatic){
