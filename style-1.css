@@ -103,6 +103,9 @@ html.smp-lock,html.smp-lock body { overflow:hidden!important; }
 #smp-app .smp-album-artist { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:11px; }
 #smp-app .smp-album-card>.smp-icon-button { position:absolute; right:-6px; bottom:12px; width:32px; height:32px; }
 #smp-app .smp-album-card>.smp-icon-button svg { width:16px; height:16px; }
+#smp-app .smp-album-card>.smp-album-menu { top:7px; right:7px; bottom:auto; width:44px; height:44px; z-index:3; background:#141418df; color:#fff; border:1px solid #ffffff26; box-shadow:0 2px 10px #0003; }
+#smp-app .smp-album-card>.smp-album-menu:hover { background:#32333a; }
+#smp-app .smp-album-card>.smp-album-menu svg { width:21px; height:21px; }
 #smp-app .smp-cover-tag { position:absolute; z-index:2; left:10px; bottom:10px; background:#141418b8; border:1px solid #ffffff26; backdrop-filter:blur(8px); color:#fff; border-radius:6px; padding:4px 7px; font-size:8px; letter-spacing:1px; }
 #smp-app .smp-genres { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
 #smp-app .smp-genre { padding:19px; position:relative; overflow:hidden; border:1px solid #ffffff0c; border-radius:13px; text-align:left; min-height:98px; background:#2b2227; }
@@ -264,6 +267,20 @@ html.smp-lock,html.smp-lock body { overflow:hidden!important; }
 #smp-app .smp-queue-row>.smp-menu-item { flex:1; min-width:0; } #smp-app .smp-queue-row .smp-menu-item span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #smp-app .smp-queue-row>.smp-icon-button { width:34px; }
 #smp-app .smp-toast { position:absolute; bottom:calc(var(--dock) + var(--nav) + 15px); left:50%; transform:translateX(-50%); padding:13px 20px; border-radius:12px; border:1px solid #53515a; background:#f2efe9; color:#242327; box-shadow:0 10px 30px #0007; max-width:min(520px,90%); width:max-content; z-index:100; font-size:12px; text-align:center; }
+#smp-app .smp-toast:not([hidden]) { display:flex; align-items:center; gap:14px; text-align:left; }
+#smp-app .smp-toast>button { flex-shrink:0; min-height:44px; padding:0 7px; color:#242327; font-weight:750; text-decoration:underline; text-underline-offset:3px; }
+#smp-app .smp-hidden-search { display:block; max-width:800px; margin:20px 0; }
+#smp-app .smp-hidden-search>span { display:block; margin-bottom:9px; color:var(--muted); font-size:12px; }
+#smp-app .smp-hidden-search input { width:100%; min-height:46px; padding:12px 15px; background:var(--surface); border:1px solid var(--line); border-radius:12px; }
+#smp-app .smp-hidden-list { max-width:800px; }
+#smp-app .smp-hidden-row { display:flex; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid var(--line); }
+#smp-app .smp-hidden-info { display:flex; align-items:center; gap:12px; flex:1; min-width:0; text-align:left; }
+#smp-app .smp-hidden-info>.smp-cover { width:56px; flex-shrink:0; }
+#smp-app .smp-hidden-info>span:last-child { min-width:0; }
+#smp-app .smp-hidden-info strong,#smp-app .smp-hidden-info small { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#smp-app .smp-hidden-info strong { font-size:13px; }
+#smp-app .smp-hidden-info small { color:var(--muted); font-size:11px; margin-top:4px; }
+#smp-app .smp-hidden-row>.smp-button { flex-shrink:0; padding:10px 13px; min-height:44px; }
 #smp-app .smp-banner { font-size:12px; padding:10px 30px; color:#f8d7a2; background:#42331e; border-bottom:1px solid #634824; }
 #smp-app .smp-banner button { text-decoration:underline; margin-left:10px; }
 #smp-app .smp-boot { text-align:center; padding:80px 15px; color:var(--muted); font-size:13px; }
@@ -372,3 +389,28 @@ html.smp-lock,html.smp-lock body { overflow:hidden!important; }
 }
 @media(prefers-reduced-motion:reduce) { #smp-app *,#smp-app *::before,#smp-app *::after { animation:none!important; transition:none!important; scroll-behavior:auto!important; } }
 @media(prefers-contrast:more) { #smp-app { --muted:#c6c6cf; --line:#62626c; } }
+
+/* Inicio 2.0.4: los discos ocupan el primer plano también en pantallas chicas. */
+#smp-app .smp-hero.smp-home-hero { min-height:174px; padding:22px 26px; margin-bottom:18px; background:linear-gradient(120deg,var(--accent-soft),#202127 70%); }
+#smp-app .smp-home-hero>div { position:relative; z-index:1; }
+#smp-app .smp-home-hero h1 { font-size:35px; letter-spacing:-1.3px; }
+#smp-app .smp-home-hero p { margin:10px 0; max-width:none; color:var(--muted); }
+#smp-app .smp-home-hero .smp-eyebrow { margin-bottom:10px; }
+#smp-app .smp-home-hero .smp-actions { margin:14px 0 0; gap:16px; }
+#smp-app .smp-home-disc { position:absolute; right:24px; top:50%; transform:translateY(-50%) rotate(-20deg); color:var(--accent); opacity:.13; }
+#smp-app .smp-home-disc svg { width:170px; height:170px; stroke-width:.6; }
+#smp-app .smp-home-caption { color:var(--muted); font-size:11px; margin:0 0 17px; }
+#smp-app .smp-home-loading { padding:24px 12px; }
+#smp-app #smp-discovery { margin-bottom:27px; }
+@media(max-width:760px) {
+  #smp-app .smp-hero.smp-home-hero { min-height:0; padding:19px; }
+  #smp-app .smp-home-hero h1 { font-size:29px; letter-spacing:-1px; }
+  #smp-app .smp-home-hero .smp-eyebrow { font-size:7px; letter-spacing:1.7px; }
+  #smp-app .smp-home-hero p { font-size:11px; max-width:255px; }
+  #smp-app .smp-home-hero .smp-button { padding:10px 14px; min-height:44px; font-size:11px; }
+  #smp-app .smp-home-disc { right:-38px; opacity:.08; }
+  #smp-app .smp-hidden-info>.smp-cover { width:44px; }
+  #smp-app .smp-hidden-info { gap:9px; }
+  #smp-app .smp-hidden-row { gap:8px; }
+  #smp-app .smp-hidden-row>.smp-button svg { display:none; }
+}
