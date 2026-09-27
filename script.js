@@ -6,7 +6,7 @@
  */
 (() => {
   'use strict';
-  const VERSION = '2.0.4';
+  const VERSION = '2.0.5';
   const DB_NAME = 'sanavera-mp3-v2';
   const RESUME_KEY = 'smp.v2.resume';
   const FALLBACK_KEY = 'smp.v2.fallback';
@@ -1558,7 +1558,8 @@
     // Mantener el foco dentro del reproductor expandido; el dialog nativo hace su propia gestión.
     root.addEventListener('keydown',e=>{
       if(e.key!=='Tab'||$('#smp-player').hidden||dialog.open)return;
-      const focusable=[...$('#smp-player').querySelectorAll('button:not(:disabled),input:not(:disabled),a[href]')];
+      // El layout por altura puede retirar acciones secundarias de esta vista.
+      const focusable=[...$('#smp-player').querySelectorAll('button:not(:disabled),input:not(:disabled),a[href]')].filter(el=>el.getClientRects().length);
       if(!focusable.length)return;
       if(e.shiftKey&&document.activeElement===focusable[0]){e.preventDefault();focusable.at(-1).focus();}
       else if(!e.shiftKey&&document.activeElement===focusable.at(-1)){e.preventDefault();focusable[0].focus();}
