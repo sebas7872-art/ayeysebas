@@ -11,7 +11,7 @@
   const RESUME_KEY = 'smp.v2.resume';
   const FALLBACK_KEY = 'smp.v2.fallback';
   const LEGACY_DONE = 'smp.v2.legacy-migrated';
-  const LIMIT = { tracks: 20000, albums: 10000, playlists: 500, playlist: 10000, history: 1500, queue: 3000, page: 24, hidden:5000, home:240, importBytes: 20 * 1024 * 1024 };
+  const LIMIT = { tracks: 20000, albums: 10000, playlists: 500, playlist: 10000, history: 1500, queue: 3000, page: 24, hidden:5000, home:175, importBytes: 20 * 1024 * 1024 };
   // Consulta exacta del DEFAULT_QUERY original. No es un filtro uploader:; Archive
   // indexa esa referencia en los metadatos públicos de las publicaciones.
   const HOME_QUERY = 'frank_wallace423';
