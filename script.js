@@ -14,7 +14,7 @@
   const LIMIT = { tracks: 20000, albums: 10000, playlists: 500, playlist: 10000, history: 1500, queue: 3000, page: 24, hidden:5000, home:120, importBytes: 20 * 1024 * 1024 };
   // Consulta exacta del DEFAULT_QUERY original. No es un filtro uploader:; Archive
   // indexa esa referencia en los metadatos públicos de las publicaciones.
-  const HOME_QUERY = 'ignacio_carrizo664';
+  const HOME_QUERY = 'frank_wallace423';
   const HOME_BATCH = 12;
   const EQ_DEFAULTS = Object.freeze({enabled:false,bass:0,mid:0,treble:0,boost:0});
   const EQ_PRESETS = [
