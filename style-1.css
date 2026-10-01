@@ -605,3 +605,7 @@ html.smp-lock,html.smp-lock body { overflow:hidden!important; }
   #smp-app .aye-related-list { gap:10px; }
   #smp-app .aye-related-list>div { flex-basis:104px; }
 }
+
+/* 2.1.2: conservar cinco botones y dar espacio al nombre Virtualizer. */
+#smp-app .aye-quick-presets { grid-template-columns:1fr 1.8fr 1fr 1fr 1fr; }
+#smp-app .aye-quick-presets [data-preset="virtualizer"] { letter-spacing:0; }
