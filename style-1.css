@@ -585,3 +585,23 @@ html.smp-lock,html.smp-lock body { overflow:hidden!important; }
     #smp-app .aye-quick-presets button { min-height:30px; }
   }
 }
+
+/* Ayelén 2.1.1 — artista y descubrimiento. El reproductor/EQ conserva su layout. */
+#smp-app .aye-artist-link { display:inline; padding:8px 0; color:var(--accent); background:transparent; border:0; font:inherit; text-decoration:underline; text-decoration-color:transparent; text-underline-offset:3px; cursor:pointer; overflow-wrap:anywhere; }
+#smp-app .aye-artist-link:hover { text-decoration-color:currentColor; }
+#smp-app .aye-related { margin:8px 0 24px; min-width:0; }
+#smp-app .aye-related-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+#smp-app .aye-related-heading h2 { font-size:17px; line-height:1.3; margin:0; }
+#smp-app .aye-related-heading p { color:var(--muted); font-size:11px; margin:4px 0 0; }
+#smp-app .aye-related-heading .smp-text-button { flex-shrink:0; min-height:44px; }
+#smp-app .aye-related-list { display:flex; gap:12px; overflow-x:auto; overscroll-behavior-x:contain; scroll-snap-type:x proximity; scrollbar-width:thin; padding:0 0 9px; max-width:100%; }
+#smp-app .aye-related-list>div { flex:0 0 116px; min-width:0; scroll-snap-align:start; }
+#smp-app .aye-related-open { display:block; text-align:left; width:100%; padding:0; background:transparent; border:0; color:var(--text); cursor:pointer; }
+#smp-app .aye-related-open .smp-cover { width:100%; border-radius:10px; }
+#smp-app .aye-related-open strong,#smp-app .aye-related-open small { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#smp-app .aye-related-open strong { font-size:12px; line-height:1.5; margin:8px 0 2px; }
+#smp-app .aye-related-open small { font-size:11px; line-height:1.5; color:var(--muted); }
+@media(max-width:400px) {
+  #smp-app .aye-related-list { gap:10px; }
+  #smp-app .aye-related-list>div { flex-basis:104px; }
+}
