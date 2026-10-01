@@ -1,12 +1,12 @@
 /*
- * Ayelén MP3 2.1.1 · Reproductor personal
+ * Ayelén MP3 2.1.2 · Reproductor personal
  * JavaScript nativo; sin compilación, claves, backend ni dependencias externas.
  * Secciones: utilidades / modelo y persistencia / Archive / interfaz / audio / acciones.
  * Las URLs de medios se construyen desde identificadores y nombres, nunca desde HTML remoto.
  */
 (() => {
   'use strict';
-  const VERSION = '2.1.1';
+  const VERSION = '2.1.2';
   const DB_NAME = 'sanavera-mp3-v2';
   const RESUME_KEY = 'smp.v2.resume';
   const FALLBACK_KEY = 'smp.v2.fallback';
@@ -30,16 +30,22 @@
 
   const EQ_FREQS=[31,62,125,250,500,1000,2000,4000,8000,16000];
   const EQ_TYPES={peaking:'Campana',lowshelf:'Low Shelf',highshelf:'High Shelf',lowpass:'Paso Bajo',highpass:'Paso Alto',notch:'Notch'};
-  const EQ_DEFAULTS=Object.freeze({enabled:false,mode:'simple',bands:Object.freeze(Array(10).fill(0)),legacy:Object.freeze([0,0,0]),preamp:0,q:1.15,autoGain:false,bassEnhancer:0,trebleExciter:0,presence:0,width:100,midGain:0,sideGain:0,crossfeed:0,compressor:false,threshold:-18,ratio:3,attack:10,release:180,knee:6,makeup:0,limiter:false,ceiling:-1,reverb:0,reverbTime:1.4,preDelay:18,parametric:Object.freeze([]),preset:'reset'});
+  const EQ_DEFAULTS=Object.freeze({enabled:false,mode:'simple',bands:Object.freeze(Array(10).fill(0)),legacy:Object.freeze([0,0,0]),preamp:0,q:1.15,autoGain:false,bassEnhancer:0,trebleExciter:0,presence:0,width:100,midGain:0,sideGain:0,crossfeed:0,compressor:false,threshold:-18,ratio:3,attack:10,release:180,knee:6,makeup:0,limiter:false,ceiling:-1,reverb:0,reverbTime:1.4,preDelay:18,parametric:Object.freeze([]),preset:'reset',live:false,liveBase:null,virtualizer:false});
+  // Presets tonales: sólo bandas gráficas; ambiente y dinámica son independientes.
   const EQ_PRESETS=[
-    {id:'rock',name:'Rock',bands:[1.5,2,1.5,0,-1,-.5,1,2,1.5,.5],preamp:-1,autoGain:true,limiter:true},
-    {id:'cumbia',name:'Cumbia',bands:[0,2,2.5,.5,-1,0,1.5,1.5,1,.5],preamp:-1,autoGain:true,bassEnhancer:8,presence:.5,limiter:true},
-    {id:'pop',name:'Pop',bands:[0,1,1,0,-.5,.5,1,1,1,.5],autoGain:true,limiter:true},
-    {id:'live',name:'Live',bands:[-1,0,.5,-.5,-1,.5,1,1,.5,0],preamp:-1,autoGain:true,width:112,reverb:16,reverbTime:1.6,preDelay:22,limiter:true},
-    {id:'bass',name:'Más graves',bands:[1,3,3,1,0,0,0,0,0,0],autoGain:true,limiter:true},
-    {id:'voice',name:'Voces',bands:[-2,-1,-1,0,1,2,2,1,0,0],autoGain:true,limiter:true},
-    {id:'bright',name:'Brillo',bands:[0,0,0,0,0,.5,1,2,2,1],autoGain:true,limiter:true}
+    {id:'rock',name:'Rock',bands:[1.5,2,1.5,0,-1,-.5,1,2,1.5,.5]},
+    {id:'pop',name:'Pop',bands:[0,1,1,0,-.5,.5,1,1,1,.5]},
+    {id:'jazz',name:'Jazz',bands:[0,.5,1,.5,0,0,.5,1,1,.5]},
+    {id:'bass',name:'Más graves',bands:[1,3,3,1,0,0,0,0,0,0]},
+    {id:'voice',name:'Voces',bands:[-2,-1,-1,0,1,2,2,1,0,0]},
+    {id:'bright',name:'Brillo',bands:[0,0,0,0,0,.5,1,2,2,1]}
   ];
+  const LIVE_SETTINGS=Object.freeze({width:160,reverb:40,reverbTime:3,preDelay:45,autoGain:false});
+  function liveBaseFrom(value){
+    const b=value&&typeof value==='object'?value:{},out={autoGain:b.autoGain===true};
+    for(const [k,min,max] of [['width',0,160],['reverb',0,40],['reverbTime',.3,3],['preDelay',0,45]])out[k]=b[k]==null?EQ_DEFAULTS[k]:clamp(b[k],min,max);
+    return out;
+  }
   const DEFAULTS={theme:'coral',quality:'balanced',volume:.8,muted:false,shuffle:false,repeat:'off',musicOnly:true,relatedCount:4,remember:true,skipErrors:true,visualizer:true,equalizer:EQ_DEFAULTS,soundLibrary:{slot:'A',a:null,b:null,custom:[]}};
 
   const AUDIO = { mp3:'audio/mpeg', m4a:'audio/mp4', aac:'audio/aac', ogg:'audio/ogg; codecs="vorbis"', oga:'audio/ogg', opus:'audio/ogg; codecs="opus"', flac:'audio/flac', wav:'audio/wav', aiff:'audio/aiff', aif:'audio/aiff', alac:'audio/mp4', wma:'audio/x-ms-wma' };
@@ -140,7 +146,7 @@
     const eq=value&&typeof value==='object'?value:{},out={...EQ_DEFAULTS};
     const ranges={preamp:[-18,12],q:[.4,3],bassEnhancer:[0,100],trebleExciter:[0,100],presence:[-4,4],width:[0,160],midGain:[-12,6],sideGain:[-12,6],crossfeed:[0,50],threshold:[-50,0],ratio:[1,12],attack:[1,100],release:[30,1000],knee:[0,30],makeup:[-12,6],ceiling:[-12,-.3],reverb:[0,40],reverbTime:[.3,3],preDelay:[0,45]};
     for(const [key,[min,max]] of Object.entries(ranges))out[key]=eq[key]==null?EQ_DEFAULTS[key]:clamp(eq[key],min,max);
-    for(const key of ['enabled','autoGain','compressor','limiter'])out[key]=eq[key]===true;
+    for(const key of ['enabled','autoGain','compressor','limiter','virtualizer'])out[key]=eq[key]===true;
     out.bands=Array.from({length:10},(_,i)=>Math.round(clamp(eq.bands?.[i],-12,12)*2)/2);
     out.legacy=Array.from({length:3},(_,i)=>clamp(eq.legacy?.[i],-9,9));
     if(!Array.isArray(eq.bands)&&['bass','mid','treble','boost'].some(k=>Object.hasOwn(eq,k))){
@@ -150,9 +156,12 @@
     out.mode=['simple','advanced','expert'].includes(eq.mode)?eq.mode:'simple';
     out.parametric=(Array.isArray(eq.parametric)?eq.parametric:[]).slice(0,6).filter(p=>p&&typeof p==='object').map((p,i)=>({id:text(p.id,'p'+i,60),type:Object.hasOwn(EQ_TYPES,p.type)?p.type:'peaking',frequency:clamp(p.frequency??1000,20,20000),gain:clamp(p.gain,-12,12),q:clamp(p.q??1,.2,10),channel:['mid','side'].includes(p.channel)?p.channel:'stereo',enabled:p.enabled!==false}));
     out.preset=text(eq.preset,eqHasProcessing(out)?'custom':'reset',100);
+    // Un LIVE de 2.1.1 conserva su sonido guardado como personalizado, sin reaplicarlo.
+    if(out.preset==='live'||out.preset==='cumbia')out.preset='custom';
+    out.live=eq.live===true;out.liveBase=out.live?liveBaseFrom(eq.liveBase):null;
     return out;
   }
-  function eqHasProcessing(e){return [...e.bands,...e.legacy,e.preamp,e.presence,e.midGain,e.sideGain,e.makeup,e.bassEnhancer,e.trebleExciter,e.crossfeed,e.reverb].some(v=>v!==0)||e.width!==100||e.compressor||e.limiter||(e.parametric||[]).some(p=>p.enabled&&(!['peaking','lowshelf','highshelf'].includes(p.type)||p.gain!==0));}
+  function eqHasProcessing(e){return e.virtualizer===true||[...e.bands,...e.legacy,e.preamp,e.presence,e.midGain,e.sideGain,e.makeup,e.bassEnhancer,e.trebleExciter,e.crossfeed,e.reverb].some(v=>v!==0)||e.width!==100||e.compressor||e.limiter||(e.parametric||[]).some(p=>p.enabled&&(!['peaking','lowshelf','highshelf'].includes(p.type)||p.gain!==0));}
   function soundLibraryFrom(value){
     const s=value&&typeof value==='object'?value:{},names=new Set();
     return {slot:s.slot==='B'?'B':'A',a:s.a?equalizerFrom(s.a):null,b:s.b?equalizerFrom(s.b):null,custom:(Array.isArray(s.custom)?s.custom:[]).slice(0,24).flatMap(p=>{
@@ -882,8 +891,8 @@
   const attrs=(o={})=>Object.entries(o).map(([k,v])=>` data-${k}="${esc(v)}"`).join('');
   const btn=(label,action,data={},kind='smp-button',symbol='')=>`<button type="button" class="${kind}" data-action="${action}"${attrs(data)}>${symbol?icon(symbol):''}${esc(label)}</button>`;
   const ibtn=(label,action,data={},symbol='more',active=false)=>`<button type="button" class="smp-icon-button${active?' is-active':''}" data-action="${action}"${attrs(data)} aria-label="${esc(label)}"${['track-like','album-like'].includes(action)?` aria-pressed="${active}"`:''}>${icon(symbol)}</button>`;
-  // Sólo fotografías/ilustraciones declaradas en los archivos. services/img puede
-  // devolver una onda genérica aun con HTTP 200 y por eso no se usa como portada.
+  // La metadata sigue validando fotografías/ilustraciones reales. La miniatura
+  // se descarga en paralelo, pero una onda genérica no se revela como portada.
   function findArtwork(files){
     const eligible=(Array.isArray(files)?files:[]).filter(f=>{
       if(!f||!validFile(f.name)||!/\.(jpe?g|png|webp)$/i.test(f.name)||[true,'true','1'].includes(f.private)||number(f.size)>8*1024*1024)return false;
@@ -896,19 +905,46 @@
   }
   const artworkJobs=new Map();let artworkActive=0,artworkObserver=null;
   const coverFallback=()=>/^https:\/\//i.test(COVER_FALLBACK_URL)?COVER_FALLBACK_URL:'';
+  const artworkHD=new Map();
   function cover(item,full=false){
     const id=item?.albumId||item?.id||'',stored=albums.get(id),file=item?.cover||stored?.cover;
     const state=file?'real':stored?.coverState||item?.coverState||'unknown';
-    const src=file?mediaURL(id,file):coverFallback();
-    return `<span class="smp-cover aye-cover" data-cover-id="${esc(id)}" data-cover-state="${state}"><span class="aye-cover-fallback" aria-hidden="true"><b>A</b><small>AYELÉN</small></span>${src?`<img src="${esc(src)}" data-fallback="${esc(coverFallback())}" alt="${esc(item?.title||'Ayelén MP3')}" loading="${full?'eager':'lazy'}" decoding="async" referrerpolicy="no-referrer" />`:''}</span>`;
+    const src=state!=='none'&&validId(id)?thumbURL(id):coverFallback();
+    return `<span class="smp-cover aye-cover" data-cover-id="${esc(id)}" data-cover-state="${state}" data-cover-full="${full}" data-cover-file="${esc(file||'')}"><span class="aye-cover-fallback" aria-hidden="true"><b>A</b><small>AYELÉN</small></span>${src?`<img src="${esc(src)}" data-fallback="${esc(coverFallback())}" alt="${esc(item?.title||'Ayelén MP3')}" loading="${full?'eager':'lazy'}" decoding="async" fetchpriority="${full?'high':'auto'}"${state==='unknown'?' style="opacity:0"':''} referrerpolicy="no-referrer" />`:''}</span>`;
+  }
+  function promoteArtwork(el){
+    const id=el.dataset.coverId,file=el.dataset.coverFile;
+    if(el.dataset.coverFull!=='true'||el.dataset.coverState!=='real'||!validId(id)||!validFile(file))return;
+    const url=mediaURL(id,file);if(el.dataset.hdRequested===url)return;el.dataset.hdRequested=url;
+    let job=artworkHD.get(url);
+    if(!job||job.expires<Date.now()){
+      const promise=new Promise(resolve=>{
+        const image=new Image();let finished=false;
+        const finish=ok=>{if(finished)return;finished=true;clearTimeout(timer);image.onload=image.onerror=null;resolve(ok);};
+        const timer=setTimeout(()=>finish(false),15000);
+        image.decoding='async';image.referrerPolicy='no-referrer';image.onload=()=>{if(image.decode)image.decode().then(()=>finish(true),()=>finish(image.naturalWidth>0));else finish(true);};image.onerror=()=>finish(false);image.src=url;
+      });
+      job={promise,expires:Date.now()+5*60*1000};artworkHD.set(url,job);
+      if(artworkHD.size>32)artworkHD.delete(artworkHD.keys().next().value);
+    }
+    job.promise.then(ok=>{
+      if(!ok||!el.isConnected||el.dataset.coverFile!==file||el.dataset.coverState!=='real')return;
+      let img=el.querySelector('img');if(!img){img=document.createElement('img');img.alt='Portada del álbum';img.decoding='async';el.append(img);}
+      img.dataset.thumb=thumbURL(id);img.dataset.fallback=coverFallback();img.dataset.hdApplied='1';img.hidden=false;img.style.opacity='1';img.src=url;
+    });
   }
   function updateArtwork(id,file){
     const a=albums.get(id);if(a){a.cover=file;a.coverState=file?'real':'none';dirtyAlbums.add(id);}
     for(const t of tracks.values())if(t.albumId===id){t.cover=file;t.coverState=file?'real':'none';dirtyTracks.add(t.id);}
     if(meta)changed();
     $$('[data-cover-id]').filter(el=>el.dataset.coverId===id).forEach(el=>{
-      el.dataset.coverState=file?'real':'none';
-      if(file){let img=el.querySelector('img');if(!img){img=document.createElement('img');img.alt='Portada del álbum';img.loading='lazy';img.decoding='async';el.append(img);}img.dataset.fallback=coverFallback();img.src=mediaURL(id,file);}
+      el.dataset.coverState=file?'real':'none';el.dataset.coverFile=file||'';
+      let img=el.querySelector('img');
+      if(file){
+        if(!img){img=document.createElement('img');img.alt='Portada del álbum';img.loading='lazy';img.decoding='async';img.src=thumbURL(id);el.append(img);}
+        img.style.opacity='1';img.dataset.fallback=coverFallback();
+        if(el.dataset.coverFull==='true'){if(artworkObserver)artworkObserver.observe(el);else if(el.getClientRects().length)promoteArtwork(el);}
+      }else if(img){if(coverFallback()){img.src=coverFallback();img.style.opacity='1';}else img.remove();}
     });
     if(currentTrack()?.albumId===id)updateMediaMetadata();
   }
@@ -925,7 +961,7 @@
     (async()=>{
       const key=`artwork:2.1.0:${id}`;
       let cached=await db.cached(key,86400000);
-      if(!cached){const data=await requestJSON(`https://archive.org/metadata/${encodeURIComponent(id)}/files`);cached={file:findArtwork(data.result||data.files||[])};await db.cachePut(key,cached);}
+      if(!cached){const known=albums.get(id);if(known&&known.coverState!=='unknown')cached={file:known.cover||''};else{const data=await requestJSON(`https://archive.org/metadata/${encodeURIComponent(id)}/files`);cached={file:findArtwork(data.result||data.files||[])};}await db.cachePut(key,cached);}
       if(epoch===dataEpoch)updateArtwork(id,cached.file);
     })().catch(()=>{/* La portada propia queda visible; un fallo no afecta la música. */})
       .finally(()=>{job.status='done';artworkActive--;drainArtwork();});
@@ -935,9 +971,9 @@
     const observe=node=>{
       if(!(node instanceof Element))return;
       const list=[...(node.matches('[data-cover-id]')?[node]:[]),...node.querySelectorAll('[data-cover-id]')];
-      list.forEach(el=>{if(el.dataset.coverState==='unknown'&&validId(el.dataset.coverId)){if(artworkObserver)artworkObserver.observe(el);else queueArtwork(el.dataset.coverId);}});
+      list.forEach(el=>{if(validId(el.dataset.coverId)&&(el.dataset.coverState==='unknown'||el.dataset.coverFull==='true')){if(artworkObserver)artworkObserver.observe(el);else{if(el.dataset.coverState==='unknown')queueArtwork(el.dataset.coverId);if(el.getClientRects().length)promoteArtwork(el);}}});
     };
-    if('IntersectionObserver'in window)artworkObserver=new IntersectionObserver(entries=>entries.forEach(e=>{if(e.isIntersecting){artworkObserver.unobserve(e.target);queueArtwork(e.target.dataset.coverId);}}),{rootMargin:'100px'});
+    if('IntersectionObserver'in window)artworkObserver=new IntersectionObserver(entries=>entries.forEach(e=>{if(e.isIntersecting){artworkObserver.unobserve(e.target);if(e.target.dataset.coverState==='unknown')queueArtwork(e.target.dataset.coverId);else promoteArtwork(e.target);}}),{rootMargin:'100px'});
     new MutationObserver(records=>records.forEach(record=>{
       record.removedNodes.forEach(n=>{if(n instanceof Element){artworkObserver?.unobserve(n);n.querySelectorAll('[data-cover-id]').forEach(el=>artworkObserver?.unobserve(el));}});
       record.addedNodes.forEach(observe);
@@ -1206,7 +1242,7 @@
     const cached=albums.get(id);
     const loaded=cached?.loadedAt&&cached.trackIds.every(tid=>tracks.has(tid));
     if(loaded&&!force)paintAlbum(cached);
-    else main.innerHTML=btn('Volver','back',{},'smp-text-button smp-back','back')+skeleton(4);
+    else main.innerHTML=btn('Volver','back',{},'smp-text-button smp-back','back')+(cached?`<section class="smp-album-hero">${cover(cached,true)}<div><span class="smp-eyebrow">ÁLBUM / INTERNET ARCHIVE</span><h1>${esc(cached.title)}</h1><p>${artistLinks(cached.artist)}</p><p role="status">Cargando canciones…</p></div></section>`:'')+skeleton(4);
     const controller=new AbortController();albumController=controller;
     if(loaded&&!force&&Date.now()-cached.loadedAt<24*60*60*1000)return;
     try{const data=await loadAlbum(id,controller.signal,force);if(viewSerial===serial&&view.name==='album'){const top=force?initialTop:main.scrollTop||viewPositions.get('album:'+id)||0;paintAlbum(data.album);main.scrollTop=top;}}
@@ -1448,7 +1484,7 @@
     n.output.connect(n.post);n.post.connect(ctx.destination);n.output.connect(n.meterSplit);n.meterSplit.connect(n.left,0);n.meterSplit.connect(n.right,1);
     n.freq=new Uint8Array(n.post.frequencyBinCount);n.preFreq=new Uint8Array(n.pre.frequencyBinCount);n.timeL=new Float32Array(n.left.fftSize);n.timeR=new Float32Array(n.right.fftSize);
     n.responseFreq=Float32Array.from({length:192},(_,i)=>20*Math.pow(Math.min(20000,ctx.sampleRate*.49)/20,i/191));n.magnitude=new Float32Array(192);n.phase=new Float32Array(192);
-    n.dispose=()=>{clearTimeout(n.irTimer);clearTimeout(n.bypassTimer);clearTimeout(n.responseTimer);if(n.convolver)n.convolver.buffer=null;n.irCache.clear();n.all.forEach(node=>{try{node.disconnect();}catch{}});};
+    n.dispose=()=>{clearTimeout(n.virtualTimer);clearTimeout(n.irTimer);clearTimeout(n.bypassTimer);clearTimeout(n.responseTimer);if(n.convolver)n.convolver.buffer=null;n.irCache.clear();n.all.forEach(node=>{try{node.disconnect();}catch{}});};
     return n;
   }
   function buildProcessing(n,ctx){
@@ -1487,7 +1523,31 @@
     n.makeup=n.gain(1);n.compSum.connect(n.makeup);
     n.limiter=n.make('DynamicsCompressor');n.limiter.ratio.value=20;n.limiter.knee.value=0;n.limiter.attack.value=.002;n.limiter.release.value=.08;
     n.ceiling=n.make('WaveShaper');n.ceiling.oversample='2x';n.limitDry=n.gain(1);n.limitWet=n.gain(0);
-    n.makeup.connect(n.limitDry);n.limitDry.connect(n.wet);n.makeup.connect(n.limiter);n.limiter.connect(n.ceiling);n.ceiling.connect(n.limitWet);n.limitWet.connect(n.wet);
+    n.virtualInput=n.gain(1);
+    n.makeup.connect(n.limitDry);n.limitDry.connect(n.virtualInput);n.makeup.connect(n.limiter);n.limiter.connect(n.ceiling);n.ceiling.connect(n.limitWet);n.limitWet.connect(n.virtualInput);
+    buildVirtualizer(n,ctx);
+  }
+  // Virtualizer lineal, sin feedback, saturación ni otra fuente de audio.
+  // M=(L+R)/2; V=.20*(M[t-7.1ms]-M[t-11.7ms]).
+  // L'=(L+V)/1.4; R'=(R-V)/1.4. En mono V se cancela exactamente.
+  // La suma absoluta de coeficientes por salida es <=1: reserva 2.92 dB
+  // sin elevar el pico máximo de entrada. No corrige clipping de otros efectos.
+  function buildVirtualizer(n,ctx){
+    n.virtualDry=n.gain(1);n.virtualWet=n.gain(0);n.virtualSum=n.gain(1);
+    n.virtualInput.connect(n.virtualDry);n.virtualDry.connect(n.wet);
+    n.virtualInput.connect(n.virtualSum);n.virtualSum.connect(n.virtualWet);n.virtualWet.connect(n.wet);
+    n.virtualSplit=n.make('ChannelSplitter');n.virtualMid=n.gain(1);n.virtualMid.channelCount=1;n.virtualMid.channelCountMode='explicit';
+    for(let i=0;i<2;i++){const half=n.gain(.5);n.virtualSplit.connect(half,i);half.connect(n.virtualMid);}
+    n.virtualSide=n.gain(1);n.virtualSide.channelCount=1;n.virtualSide.channelCountMode='explicit';
+    for(const [time,amount] of [[.0071,.20],[.0117,-.20]]){const delay=ctx.createDelay(.03);n.all.push(delay);delay.delayTime.value=time;const level=n.gain(amount);n.virtualMid.connect(delay);delay.connect(level);level.connect(n.virtualSide);}
+    const merge=n.make('ChannelMerger'),inverse=n.gain(-1);n.virtualSide.connect(merge,0,0);n.virtualSide.connect(inverse);inverse.connect(merge,0,1);merge.connect(n.virtualSum);
+    n.virtualConnected=false;n.virtualOn=false;n.virtualTimer=0;
+  }
+  function configureVirtualizer(n,ctx,on,immediate){
+    if(!n.virtualInput)return;clearTimeout(n.virtualTimer);n.virtualOn=on;
+    if(on&&!n.virtualConnected){n.virtualInput.connect(n.virtualSplit);n.virtualConnected=true;}
+    smoothParam(n.virtualDry.gain,on?0:1,ctx,immediate);smoothParam(n.virtualWet.gain,on?1/1.4:0,ctx,immediate);
+    if(!on&&n.virtualConnected){const stop=()=>{if(n.virtualOn)return;try{n.virtualInput.disconnect(n.virtualSplit);}catch{}n.virtualConnected=false;};if(immediate)stop();else n.virtualTimer=setTimeout(stop,60);}
   }
   function smoothParam(param,value,ctx,immediate=false){
     const now=ctx.currentTime;
@@ -1540,6 +1600,7 @@
       param(n.limiter.threshold,e.ceiling);gain(n.limitDry,e.limiter?0:1);gain(n.limitWet,e.limiter?1:0);
       if(n.ceilingDb!==e.ceiling){const curve=new Float32Array(4097),peak=Math.pow(10,e.ceiling/20),knee=.8*peak;for(let i=0;i<curve.length;i++){const x=i*2/(curve.length-1)-1,a=Math.abs(x);curve[i]=a<=knee?x:Math.sign(x)*(knee+(peak-knee)*Math.tanh((a-knee)/(peak-knee)));}n.ceiling.curve=curve;n.ceilingDb=e.ceiling;}
     }
+    configureVirtualizer(n,ctx,enabled&&e.virtualizer,immediate);
     gain(n.dry,enabled?0:1);gain(n.wet,enabled?1:0);
     if(!enabled&&n.processing){const disconnect=()=>{if(n.wet.gain.value>.001)return;try{n.input.disconnect(n.preamp);}catch{}n.processing=false;clearTimeout(n.irTimer);n.convolver.buffer=null;};if(immediate)disconnect();else n.bypassTimer=setTimeout(disconnect,60);}
     n.responseDirty=true;n.responseAfter=ctx.currentTime+(immediate?0:.04);
@@ -1645,14 +1706,14 @@
     return `<label class="aye-eq-control"><span>${esc(label)}<output data-eq-output="${key}">${esc(value+unit)}</output></span><input type="range" data-sound="${key}" data-unit="${esc(unit)}" min="${min}" max="${max}" step="${step}" value="${value}" aria-label="${esc(label)}" /></label>`;
   }
   function eqCheck(key,label){return `<label class="aye-eq-check"><span>${esc(label)}</span><input type="checkbox" data-sound-check="${key}"${meta.settings.equalizer[key]?' checked':''} /></label>`;}
-  function quickPresets(){return `<div class="aye-quick-presets" aria-label="Presets rápidos de sonido">${['rock','cumbia','pop','live','reset'].map(id=>`<button type="button" data-action="sound-preset" data-preset="${id}" aria-pressed="false">${id.toUpperCase()}</button>`).join('')}</div>`;}
+  function quickPresets(){return `<div class="aye-quick-presets" aria-label="Presets rápidos de sonido">${['rock','virtualizer','pop','live','reset'].map(id=>`<button type="button" data-action="sound-preset" data-preset="${id}" aria-pressed="false">${id==='virtualizer'?'Virtualizer':id.toUpperCase()}</button>`).join('')}</div>`;}
   function showEqualizer(){
     const e=meta.settings.equalizer;
     const simpleGroups=[['bass','Graves'],['mid','Medios'],['treble','Agudos']];
     const simple=`<div class="aye-eq-controls">${simpleGroups.map(([key,label])=>`<label class="aye-eq-control"><span>${label}<output data-simple-output="${key}"></output></span><input type="range" data-simple="${key}" min="-12" max="12" step=".5" value="0" aria-label="${label}" /></label>`).join('')}${eqSlider('preamp','Preamplificador',-18,12,.5,' dB')}</div><p class="smp-note" id="aye-extra-effects"></p>`;
     const graphic=`<div class="aye-eq-graphic" aria-label="Ecualizador de diez bandas">${EQ_FREQS.map((f,i)=>`<label class="aye-band"><output data-band-value="${i}">0</output><span class="aye-band-rail"><i></i><input type="range" data-band="${i}" min="-12" max="12" step=".5" value="${e.bands[i]}" aria-label="${f} Hz" /></span><span>${freqLabel(f)}</span></label>`).join('')}</div><p class="aye-eq-scale">−12 a +12 dB · Frecuencias en Hz</p><div class="aye-eq-controls">${eqSlider('preamp','Preamplificador',-18,12,.5,' dB')}${eqSlider('q','Q de las campanas',.4,3,.05)}</div>`;
     const expert=`<details class="aye-tools" open><summary>Color y espacio</summary><div class="aye-eq-controls">${eqSlider('bassEnhancer','Armónicos graves',0,100,1,'%')}${eqSlider('trebleExciter','Excitador de agudos',0,100,1,'%')}${eqSlider('presence','Presencia',-4,4,.5,' dB')}${eqSlider('width','Ancho estéreo',0,160,1,'%')}${eqSlider('crossfeed','Crossfeed',0,50,1,'%')}${eqSlider('reverb','Reverb',0,40,1,'%')}${eqSlider('reverbTime','Cola de reverb',.3,3,.1,' s')}${eqSlider('preDelay','Predelay',0,45,1,' ms')}</div></details><details class="aye-tools"><summary>Dinámica y nivel</summary>${eqCheck('compressor','Compresor')}<div class="aye-eq-controls">${eqSlider('threshold','Umbral',-50,0,1,' dB')}${eqSlider('ratio','Ratio',1,12,.5,':1')}${eqSlider('attack','Ataque',1,100,1,' ms')}${eqSlider('release','Release',30,1000,10,' ms')}${eqSlider('knee','Rodilla',0,30,1,' dB')}${eqSlider('makeup','Makeup',-12,6,.5,' dB')}</div>${eqCheck('limiter','Limiter final')}<div class="aye-eq-controls">${eqSlider('ceiling','Techo',-12,-.3,.1,' dBFS')}</div><p class="smp-note">El techo controla picos de muestras; no es un medidor ni un limitador true peak certificado.</p></details><div class="aye-meter-grid"><span>RMS <b data-meter="rms">—</b></span><span>Peak <b data-meter="peak">—</b></span><span>Hold <b data-meter="hold">—</b></span><span>Correlación <b data-meter="corr">—</b></span></div><canvas class="aye-spectrum" data-visual="spectrum" aria-label="Espectro pre y post procesamiento"></canvas><p class="aye-eq-scale">Espectro: entrada tenue · salida con acento</p><button type="button" class="smp-text-button aye-lab-toggle" data-action="sound-lab" aria-expanded="${eqUI.lab}">${eqUI.lab?'Cerrar laboratorio':'Abrir laboratorio'}</button>${eqUI.lab?labHTML():''}`;
-    showDialog('Tu sonido · Ayelén',`<section id="smp-equalizer" class="aye-equalizer"><div class="smp-eq-power"><label for="smp-eq-enabled"><strong>Procesamiento</strong><span id="smp-eq-preset-label"></span></label><input type="checkbox" role="switch" id="smp-eq-enabled"${e.enabled?' checked':''} /></div><p id="smp-eq-status" class="smp-eq-status" role="status"></p>${quickPresets()}<div class="aye-eq-modes" aria-label="Modo del ecualizador">${[['simple','Simple'],['advanced','Avanzado'],['expert','Experto']].map(([mode,label])=>`<button type="button" data-action="sound-mode" data-mode="${mode}" aria-pressed="${mode===e.mode}">${label}</button>`).join('')}</div>${e.mode==='simple'?simple:graphic}${eqCheck('autoGain','Compensar realces de EQ')}${e.mode==='expert'?expert:''}<div class="aye-eq-footer">${btn('Restaurar sonido','sound-reset',{},'smp-text-button','repeat')}${btn('Listo','dialog-close',{},'smp-button smp-primary','check')}</div><button id="smp-eq-retry" type="button" data-action="eq-retry" class="smp-button" hidden>Reintentar procesamiento</button></section>`);
+    showDialog('Tu sonido · Ayelén',`<section id="smp-equalizer" class="aye-equalizer"><div class="smp-eq-power"><label for="smp-eq-enabled"><strong>Procesamiento</strong><span id="smp-eq-preset-label"></span></label><input type="checkbox" role="switch" id="smp-eq-enabled"${e.enabled?' checked':''} /></div><p id="smp-eq-status" class="smp-eq-status" role="status"></p>${quickPresets()}${toneChoices()}<div class="aye-eq-modes" aria-label="Modo del ecualizador">${[['simple','Simple'],['advanced','Avanzado'],['expert','Experto']].map(([mode,label])=>`<button type="button" data-action="sound-mode" data-mode="${mode}" aria-pressed="${mode===e.mode}">${label}</button>`).join('')}</div>${e.mode==='simple'?simple:graphic}${eqCheck('autoGain','Compensar realces de EQ')}${e.mode==='expert'?expert:''}<div class="aye-eq-footer">${btn('Restaurar sonido','sound-reset',{},'smp-text-button','repeat')}${btn('Listo','dialog-close',{},'smp-button smp-primary','check')}</div><button id="smp-eq-retry" type="button" data-action="eq-retry" class="smp-button" hidden>Reintentar procesamiento</button></section>`);
     dialog.classList.add('aye-eq-dialog');updateEqualizerUI();syncVisuals();drawResponse();
   }
   function labHTML(){
@@ -1663,7 +1724,10 @@
   const paramY=g=>clamp((12-g)/24*100,0,100);
   function setEqualizer(patch,{retry=false,manual=true}={}){
     if(importBusy)return;
-    if(manual&&Object.keys(patch).some(k=>!['mode','enabled','preset'].includes(k)))patch={...patch,enabled:true,preset:'custom'};
+    if(manual&&Object.keys(patch).some(k=>!['mode','enabled','preset'].includes(k))){
+      patch={...patch,enabled:true};
+      if(['bands','legacy','q','parametric'].some(k=>Object.hasOwn(patch,k)))patch.preset='custom';
+    }
     meta.settings.equalizer=equalizerFrom({...meta.settings.equalizer,...patch});
     if(retry){sound.disabled=false;sound.notice='';sound.blocked.delete(audio.getAttribute('src'));}
     if(audioAnalysisWanted()&&currentTrack())prepareSound();else applyEqualizer();
@@ -1678,26 +1742,41 @@
     toast('Sonido original restaurado. Todos los efectos en estado neutro.');
   }
   function applySoundPreset(id){
-    if(id==='reset'||id==='flat'){resetSound();return;}
-    const preset=EQ_PRESETS.find(p=>p.id===id);if(!preset)return;
-    setEqualizer({...equalizerFrom(EQ_DEFAULTS),...preset,preset:id,mode:meta.settings.equalizer.mode,enabled:true},{manual:false});
+    if(id==='reset'){resetSound();return;}
+    const e=meta.settings.equalizer;
+    if(id==='live'){
+      if(e.enabled&&e.live)setEqualizer({...liveBaseFrom(e.liveBase),live:false,liveBase:null},{manual:false});
+      else setEqualizer({...LIVE_SETTINGS,live:true,liveBase:e.live?e.liveBase:liveBaseFrom(e),enabled:true},{manual:false});
+    }else if(id==='virtualizer'){
+      setEqualizer({virtualizer:!(e.enabled&&e.virtualizer),enabled:true},{manual:false});
+    }else{
+      const preset=EQ_PRESETS.find(p=>p.id===id);if(!preset&&id!=='flat')return;
+      const flat=id==='flat'||(e.enabled&&e.preset===id);
+      setEqualizer({bands:flat?Array(10).fill(0):preset.bands.slice(),legacy:[0,0,0],preset:flat?'flat':id,enabled:true},{manual:false});
+    }
     if(dialog.open&&$('#smp-equalizer'))showEqualizer();
+  }
+  function tonePreset(e){return EQ_PRESETS.find(p=>p.id===e.preset)?.id||(!e.bands.some(Boolean)&&!e.legacy.some(Boolean)?'flat':'custom');}
+  function toneChoices(){
+    const tone=tonePreset(meta.settings.equalizer);
+    return `<label class="aye-eq-control"><span>Preset de EQ gráfico</span><select data-eq-tone aria-label="Preset de EQ gráfico">${[{id:'flat',name:'Flat'},...EQ_PRESETS,{id:'custom',name:'Personalizado'}].map(p=>`<option value="${p.id}"${tone===p.id?' selected':''}${p.id==='custom'?' disabled':''}>${p.name}</option>`).join('')}</select></label>`;
   }
   function updateEqualizerUI(){
     if(!root||!meta)return;
     const e=meta.settings.equalizer,status=equalizerStatus(),active=e.enabled&&eqHasProcessing(e)&&!sound.disabled&&!sound.blocked.has(audio.getAttribute('src'));
     $$('[data-action="equalizer"]').forEach(b=>{b.classList.toggle('is-active',active);b.setAttribute('aria-label','Abrir ecualizador'+(active?', activado':''));});
     for(const id of ['#smp-eq-summary','#smp-eq-status']){const el=$(id);if(el&&el.textContent!==status)el.textContent=status;}
-    $$('[data-action="sound-preset"]').forEach(b=>{const chosen=b.dataset.preset==='reset'?!e.enabled||!eqHasProcessing(e):e.enabled&&e.preset===b.dataset.preset;b.setAttribute('aria-pressed',String(chosen));});
+    $$('[data-action="sound-preset"]').forEach(b=>{const chosen=b.dataset.preset==='reset'?!e.enabled||!eqHasProcessing(e):b.dataset.preset==='live'?e.enabled&&e.live:b.dataset.preset==='virtualizer'?e.enabled&&e.virtualizer:e.enabled&&e.preset===b.dataset.preset;b.setAttribute('aria-pressed',String(chosen));});
     const panel=dialog?.open?$('#smp-equalizer'):null;if(!panel)return;
     $('#smp-eq-enabled').checked=e.enabled;
-    const label=$('#smp-eq-preset-label');label.textContent=EQ_PRESETS.find(p=>p.id===e.preset)?.name||(e.preset==='reset'?'Neutro':'Personalizado');
+    const label=$('#smp-eq-preset-label');label.textContent=[EQ_PRESETS.find(p=>p.id===tonePreset(e))?.name||(tonePreset(e)==='flat'?'Flat':'EQ personalizado'),e.live?'LIVE':'',e.virtualizer?'Virtualizer':''].filter(Boolean).join(' · ');
+    const tone=panel.querySelector('[data-eq-tone]');if(tone)tone.value=tonePreset(e);
     panel.querySelectorAll('[data-sound]').forEach(el=>{const v=e[el.dataset.sound];if(document.activeElement!==el)el.value=v;const out=panel.querySelector(`[data-eq-output="${el.dataset.sound}"]`);if(out)out.textContent=Number(v).toLocaleString('es-AR',{maximumFractionDigits:2})+(el.dataset.unit||'');});
     panel.querySelectorAll('[data-sound-check]').forEach(el=>el.checked=e[el.dataset.soundCheck]);
     panel.querySelectorAll('[data-band]').forEach(el=>{const i=Number(el.dataset.band),v=e.bands[i];el.value=v;el.setAttribute('aria-valuetext',dbLabel(v));el.parentElement.style.setProperty('--band-pos',paramY(v)+'%');panel.querySelector(`[data-band-value="${i}"]`).textContent=(v>0?'+':'')+v;});
     const groups={bass:[0,1,2,3],mid:[4,5,6],treble:[7,8,9]};
     panel.querySelectorAll('[data-simple]').forEach(el=>{const key=el.dataset.simple,list=groups[key],v=clamp(list.reduce((s,i)=>s+e.bands[i],0)/list.length+e.legacy[['bass','mid','treble'].indexOf(key)],-12,12);el.value=v;panel.querySelector(`[data-simple-output="${key}"]`).textContent=dbLabel(Math.round(v*2)/2);});
-    const extra=$('#aye-extra-effects');if(extra)extra.textContent=(e.reverb||e.width!==100||e.compressor||e.limiter||e.parametric.length||e.bassEnhancer||e.trebleExciter||e.presence||e.crossfeed||e.midGain||e.sideGain||e.makeup)?'Hay ajustes adicionales guardados en Experto. Restaurar sonido limpia toda la cadena.':'Graves, voces y brillo. Pasá a Avanzado para ajustar cada frecuencia.';
+    const extra=$('#aye-extra-effects');if(extra)extra.textContent=(e.virtualizer||e.reverb||e.width!==100||e.compressor||e.limiter||e.parametric.length||e.bassEnhancer||e.trebleExciter||e.presence||e.crossfeed||e.midGain||e.sideGain||e.makeup)?'Hay ajustes adicionales guardados en Experto. Restaurar sonido limpia toda la cadena.':'Graves, voces y brillo. Pasá a Avanzado para ajustar cada frecuencia.';
     $('#smp-eq-retry').hidden=!(e.enabled&&(sound.disabled||sound.blocked.has(audio.getAttribute('src'))));
     panel.querySelectorAll('[data-param-point]').forEach(b=>{const i=Number(b.dataset.paramPoint),p=e.parametric[i];if(p){b.style.left=paramX(p.frequency)+'%';b.style.top=paramY(p.gain)+'%';b.setAttribute('aria-pressed',String(i===eqUI.selected));b.classList.toggle('is-disabled',!p.enabled);}});
     if(eqUI.drag){const p=e.parametric[eqUI.selected];for(const key of ['frequency','gain']){const el=panel.querySelector(`[data-param="${key}"]`);if(el)el.value=Math.round(p[key]*2)/2;}}
@@ -1734,7 +1813,7 @@
       if(el.dataset.band!==undefined){const bands=meta.settings.equalizer.bands.slice();bands[Number(el.dataset.band)]=number(el.value);setEqualizer({bands});}
       if(el.dataset.simple){const groups={bass:[0,1,2,3],mid:[4,5,6],treble:[7,8,9]},bands=meta.settings.equalizer.bands.slice(),legacy=meta.settings.equalizer.legacy.slice();groups[el.dataset.simple].forEach(i=>bands[i]=number(el.value));legacy[['bass','mid','treble'].indexOf(el.dataset.simple)]=0;setEqualizer({bands,legacy});}
     });
-    root.addEventListener('change',event=>{if(importBusy)return;const el=event.target;if(el.dataset.soundCheck)setEqualizer({[el.dataset.soundCheck]:el.checked});if(el.dataset.param){editParam({[el.dataset.param]:el.type==='checkbox'?el.checked:el.type==='number'?number(el.value):el.value});if(['type','channel'].includes(el.dataset.param))showEqualizer();}});
+    root.addEventListener('change',event=>{if(importBusy)return;const el=event.target;if(el.matches('[data-eq-tone]')){applySoundPreset(el.value);return;}if(el.dataset.soundCheck)setEqualizer({[el.dataset.soundCheck]:el.checked});if(el.dataset.param){editParam({[el.dataset.param]:el.type==='checkbox'?el.checked:el.type==='number'?number(el.value):el.value});if(['type','channel'].includes(el.dataset.param))showEqualizer();}});
     root.addEventListener('pointerdown',event=>{
       const point=event.target.closest('[data-param-point]');if(!point||importBusy)return;
       event.preventDefault();eqUI.selected=number(point.dataset.paramPoint);const plot=$('#aye-param-plot'),rect=plot.querySelector('.aye-param-points').getBoundingClientRect();
@@ -2384,6 +2463,7 @@
     });
     root.addEventListener('error',e=>{
       const img=e.target;if(img.tagName!=='IMG')return;
+      if(img.dataset.hdApplied==='1'&&img.dataset.thumb){delete img.dataset.hdApplied;img.src=img.dataset.thumb;return;}
       if(!img.dataset.triedFallback&&img.dataset.fallback&&img.src!==img.dataset.fallback){img.dataset.triedFallback='1';img.src=img.dataset.fallback;}
       else{img.hidden=true;img.removeAttribute('src');}
     },true);
