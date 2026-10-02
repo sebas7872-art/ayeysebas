@@ -1,4 +1,4 @@
-/* Ayelén MP3 2.1 · CSS 2.1.0: reproductor adaptable al alto disponible.
+/* Ayelén MP3 2.1.4 · CSS 2.1.4: reproductor adaptable al alto disponible.
    Todos los estilos se limitan a #smp-app. Sin fuentes ni iconos externos. */
 #smp-app {
   --bg:#101113; --surface:#18191d; --elevated:#222328; --hover:#2b2c32; --text:#f5f2ec; --muted:#a5a5ad;
@@ -495,6 +495,7 @@ html.smp-lock,html.smp-lock body { overflow:hidden!important; }
 #smp-app .aye-cover-fallback b { font:italic 800 clamp(24px,7vw,76px)/1 system-ui,sans-serif; letter-spacing:-.08em; transform:translateX(-.04em); }
 #smp-app .aye-cover-fallback small { font-size:8px; letter-spacing:2px; margin-top:8px; }
 #smp-app .aye-cover img { position:relative; z-index:1; width:100%; height:100%; object-fit:cover; }
+#smp-app .aye-cover[data-artwork-visible="true"] .aye-cover-fallback { visibility:hidden; }
 #smp-app .smp-mini-cover .aye-cover-fallback small,#smp-app .smp-track .aye-cover-fallback small { display:none; }
 #smp-app .smp-mini-cover { position:relative; }
 #smp-app .aye-mini-visual { position:absolute; z-index:2; pointer-events:none; width:calc(100% - 10px); height:15px; bottom:4px; left:5px; filter:drop-shadow(0 1px 2px #000); }
@@ -606,8 +607,9 @@ html.smp-lock,html.smp-lock body { overflow:hidden!important; }
   #smp-app .aye-related-list>div { flex-basis:104px; }
 }
 
-/* 2.1.2: conservar cinco botones y dar espacio al nombre Virtualizer. */
-#smp-app .aye-quick-presets { grid-template-columns:1fr 1.8fr 1fr 1fr 1fr; }
+/* 2.1.4: seis modos visibles, con espacio para Virtualizer y SURROUND. */
+#smp-app .aye-quick-presets { grid-template-columns:1fr 1fr 1fr 1.65fr 1.85fr 1fr; gap:3px; }
+#smp-app .aye-quick-presets button { font-size:clamp(8px,2.3vw,10px); letter-spacing:0; padding-inline:1px; }
 #smp-app .aye-quick-presets [data-preset="virtualizer"] { letter-spacing:0; }
 
 /* 2.1.3: acciones de la portada; misma altura útil para la imagen. */
