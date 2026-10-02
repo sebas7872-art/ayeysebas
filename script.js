@@ -1,12 +1,13 @@
 /*
- * Ayelén MP3 2.1.3 · Reproductor personal
+ * Ayelén MP3 2.1.4 · Reproductor personal
  * JavaScript nativo; sin compilación, claves, backend ni dependencias externas.
  * Secciones: utilidades / modelo y persistencia / Archive / interfaz / audio / acciones.
  * Las URLs de medios se construyen desde identificadores y nombres, nunca desde HTML remoto.
  */
 (() => {
   'use strict';
-  const VERSION = '2.1.3';
+  const VERSION = '2.1.4';
+  const ARTWORK_REV = '2.1.4';
   const DB_NAME = 'sanavera-mp3-v2';
   const RESUME_KEY = 'smp.v2.resume';
   const FALLBACK_KEY = 'smp.v2.fallback';
@@ -15,11 +16,11 @@
   // CONFIGURACIÓN DEL INICIO / BÚSQUEDAS ALEATORIAS
   // Editá estas seis posiciones. Los espacios vacíos se ignoran automáticamente.
   const HOME_SEARCH_SEEDS = [
-    "grandes éxitos",
-    "",
-    "",
-    "",
-    "",
+    "Leader music",
+    "Sin miedo",
+    "Un poco de ruido",
+    "Patricio rey y sus redonditos de ricota",
+    "Grandes exitos",
     ""
   ];
   const homeSeeds = [...new Set(HOME_SEARCH_SEEDS.filter(s=>typeof s==='string').map(s=>s.trim()).filter(Boolean))];
@@ -30,7 +31,7 @@
 
   const EQ_FREQS=[31,62,125,250,500,1000,2000,4000,8000,16000];
   const EQ_TYPES={peaking:'Campana',lowshelf:'Low Shelf',highshelf:'High Shelf',lowpass:'Paso Bajo',highpass:'Paso Alto',notch:'Notch'};
-  const EQ_DEFAULTS=Object.freeze({enabled:false,mode:'simple',bands:Object.freeze(Array(10).fill(0)),legacy:Object.freeze([0,0,0]),preamp:0,q:1.15,autoGain:false,bassEnhancer:0,trebleExciter:0,presence:0,width:100,midGain:0,sideGain:0,crossfeed:0,compressor:false,threshold:-18,ratio:3,attack:10,release:180,knee:6,makeup:0,limiter:false,ceiling:-1,reverb:0,reverbTime:1.4,preDelay:18,parametric:Object.freeze([]),preset:'reset',live:false,liveBase:null,virtualizer:false,virtualBase:null});
+  const EQ_DEFAULTS=Object.freeze({enabled:false,mode:'simple',bands:Object.freeze(Array(10).fill(0)),legacy:Object.freeze([0,0,0]),preamp:0,q:1.15,autoGain:false,bassEnhancer:0,trebleExciter:0,presence:0,width:100,midGain:0,sideGain:0,crossfeed:0,compressor:false,threshold:-18,ratio:3,attack:10,release:180,knee:6,makeup:0,limiter:false,ceiling:-1,reverb:0,reverbTime:1.4,preDelay:18,parametric:Object.freeze([]),preset:'reset',live:false,liveBase:null,virtualizer:false,virtualBase:null,surround:false,surroundBase:null});
   // Presets tonales: sólo bandas gráficas; ambiente y dinámica son independientes.
   const EQ_PRESETS=[
     {id:'rock',name:'Rock',bands:[1.5,2,1.5,0,-1,-.5,1,2,1.5,.5]},
@@ -42,6 +43,10 @@
   ];
   const LIVE_SETTINGS=Object.freeze({width:160,reverb:40,reverbTime:3,preDelay:45,autoGain:false});
   const VIRTUAL_SETTINGS=Object.freeze({bassEnhancer:0,trebleExciter:0,presence:0,width:160,crossfeed:0,reverb:0,reverbTime:1.4,preDelay:18,midGain:0,sideGain:6,compressor:false,parametric:Object.freeze([])});
+  // Sonido propio de Ayelén, inspirado en equipos estéreo; no emulación de Sony.
+  // Receta exclusiva: graves centrales, laterales filtrados, reflexiones cortas
+  // antes de la dinámica/limitador. Todos los demás efectos parten de neutro.
+  const SURROUND_SETTINGS=Object.freeze({bands:Object.freeze([0,2.5,2,0,-.5,0,1,1.5,1,0]),preamp:-3,q:.85,width:145,presence:.5,bassEnhancer:8,trebleExciter:4,reverb:8,reverbTime:.45,preDelay:12,compressor:true,threshold:-19,ratio:2.2,attack:15,release:180,knee:12,makeup:3,limiter:true,ceiling:-1.2,preset:'surround',parametric:Object.freeze([{id:'surround-bass-center',type:'highpass',frequency:150,gain:0,q:.707,channel:'side',enabled:true}])});
   function virtualBaseFrom(value){
     const clean=equalizerFrom({...value,virtualizer:false,virtualBase:null});
     return Object.fromEntries(Object.keys(VIRTUAL_SETTINGS).map(k=>[k,clean[k]]));
@@ -151,7 +156,7 @@
     const eq=value&&typeof value==='object'?value:{},out={...EQ_DEFAULTS};
     const ranges={preamp:[-18,12],q:[.4,3],bassEnhancer:[0,100],trebleExciter:[0,100],presence:[-4,4],width:[0,160],midGain:[-12,6],sideGain:[-12,6],crossfeed:[0,50],threshold:[-50,0],ratio:[1,12],attack:[1,100],release:[30,1000],knee:[0,30],makeup:[-12,6],ceiling:[-12,-.3],reverb:[0,40],reverbTime:[.3,3],preDelay:[0,45]};
     for(const [key,[min,max]] of Object.entries(ranges))out[key]=eq[key]==null?EQ_DEFAULTS[key]:clamp(eq[key],min,max);
-    for(const key of ['enabled','autoGain','compressor','limiter','virtualizer'])out[key]=eq[key]===true;
+    for(const key of ['enabled','autoGain','compressor','limiter','virtualizer','surround'])out[key]=eq[key]===true;
     out.bands=Array.from({length:10},(_,i)=>Math.round(clamp(eq.bands?.[i],-12,12)*2)/2);
     out.legacy=Array.from({length:3},(_,i)=>clamp(eq.legacy?.[i],-9,9));
     if(!Array.isArray(eq.bands)&&['bass','mid','treble','boost'].some(k=>Object.hasOwn(eq,k))){
@@ -165,9 +170,15 @@
     if(out.preset==='live'||out.preset==='cumbia')out.preset='custom';
     out.live=eq.live===true;out.liveBase=out.live?liveBaseFrom(eq.liveBase):null;
     out.virtualBase=out.virtualizer&&eq.virtualBase?virtualBaseFrom(eq.virtualBase):null;
+    // La receta se normaliza igual al importar, recuperar A/B o recargar.
+    // Una base nunca contiene otra base Surround recursiva.
+    if(out.surround){
+      const base=eq.surroundBase?equalizerFrom({...eq.surroundBase,surround:false,surroundBase:null}):null;
+      Object.assign(out,equalizerFrom({...EQ_DEFAULTS,...SURROUND_SETTINGS,mode:out.mode,enabled:out.enabled}),{surround:true,surroundBase:base});
+    }else out.surroundBase=null;
     return out;
   }
-  function eqHasProcessing(e){return e.virtualizer===true||[...e.bands,...e.legacy,e.preamp,e.presence,e.midGain,e.sideGain,e.makeup,e.bassEnhancer,e.trebleExciter,e.crossfeed,e.reverb].some(v=>v!==0)||e.width!==100||e.compressor||e.limiter||(e.parametric||[]).some(p=>p.enabled&&(!['peaking','lowshelf','highshelf'].includes(p.type)||p.gain!==0));}
+  function eqHasProcessing(e){return e.surround===true||e.virtualizer===true||[...e.bands,...e.legacy,e.preamp,e.presence,e.midGain,e.sideGain,e.makeup,e.bassEnhancer,e.trebleExciter,e.crossfeed,e.reverb].some(v=>v!==0)||e.width!==100||e.compressor||e.limiter||(e.parametric||[]).some(p=>p.enabled&&(!['peaking','lowshelf','highshelf'].includes(p.type)||p.gain!==0));}
   function soundLibraryFrom(value){
     const s=value&&typeof value==='object'?value:{},names=new Set();
     return {slot:s.slot==='B'?'B':'A',a:s.a?equalizerFrom(s.a):null,b:s.b?equalizerFrom(s.b):null,custom:(Array.isArray(s.custom)?s.custom:[]).slice(0,24).flatMap(p=>{
@@ -299,7 +310,7 @@
 
   // Audio offline separado de la biblioteca y del caché descartable de metadata.
   const OFFLINE_MAX_BYTES=40*1024*1024;
-  const offline={ids:new Set(),pending:new Set(),queue:[],running:null,controller:null,active:'',epoch:0,total:0,done:0,failed:0,clearing:false,ready:Promise.resolve(),message:''};
+  const offline={ids:new Set(),pending:new Set(),removing:new Set(),queue:[],running:null,controller:null,active:'',epoch:0,total:0,done:0,failed:0,clearing:false,ready:Promise.resolve(),message:''};
   let offlineURL='',offlineURLId='',offlineURLSource='';
   function offlineSourceOK(s){
     if(!s||!supported(s)||/lossless|flac|alac|apple lossless|wave|pcm|aiff/i.test(s.format||''))return false;
@@ -320,13 +331,22 @@
   }
   function releaseOfflineURL(){if(offlineURL)URL.revokeObjectURL(offlineURL);offlineURL=offlineURLId=offlineURLSource='';}
   function offlineBadge(id){return `<span class="aye-offline-badge" data-offline-id="${esc(id)}">${offline.ids.has(id)?' · Offline':offline.pending.has(id)?' · Descargando…':''}</span>`;}
-  function offlineControls(){return `<div class="smp-actions aye-offline-actions">${btn('Descargar todas','offline-all',{},'smp-button','download')}${btn('Eliminar descargas','offline-clear',{},'smp-text-button','trash')}</div><p class="smp-note" id="aye-offline-status" role="status"></p>`;}
+  function offlineControls(playlistId=''){return `<div class="smp-actions aye-offline-actions">${btn('Descargar todas','offline-all',{id:playlistId},'smp-button','download')}${playlistId?btn('Administrar descargas','navigate',{view:'offline'},'smp-text-button'):btn('Eliminar descargas','offline-clear',{},'smp-text-button','trash')}</div><p class="smp-note" id="aye-offline-status" data-playlist="${esc(playlistId)}" role="status"></p>`;}
+  function offlineMenu(id){return btn(offline.ids.has(id)?'Eliminar copia offline':offline.pending.has(id)?'Cancelar descarga offline':'Guardar para offline',offline.ids.has(id)||offline.pending.has(id)?'offline-remove':'offline-track',{id},'smp-menu-item',offline.ids.has(id)||offline.pending.has(id)?'trash':'download');}
+  function renderOffline(){
+    main.innerHTML=btn('Tu biblioteca','navigate',{view:'library'},'smp-text-button smp-back','back')+pageHead('Tu música offline','Una copia por canción, compartida entre todas tus playlists. Las descargas se administran por separado de Me gusta.',btn('Escuchar','offline-play',{},'smp-button smp-primary','play'))+
+      `<div class="smp-actions">${btn('Eliminar todas las descargas','offline-clear',{},'smp-text-button','trash')}</div><p id="aye-offline-status" class="smp-note" role="status"></p><div id="aye-offline-list"></div>`+
+      '<p class="smp-note">El audio se guarda en este navegador. Abrí Ayelén antes de quedarte sin conexión: Blogger necesita Internet para cargar la página. Los respaldos exportan la biblioteca, no los archivos de audio.</p>';
+    updateOfflineUI();
+  }
   function updateOfflineUI(){
     if(!root||!meta)return;
-    const status=$('#aye-offline-status');if(status)status.textContent=offline.clearing?'Eliminando copias locales…':offline.running?`Descargando ${Math.min(offline.done+1,offline.total)} de ${offline.total}${offline.failed?' · '+offline.failed+' sin descargar':''}`:offline.message||`${meta.likes.filter(id=>offline.ids.has(id)).length} favoritas disponibles offline. Las copias de audio no se incluyen en el respaldo de la biblioteca.`;
+    const status=$('#aye-offline-status'),scope=status?.dataset.playlist?meta.playlists.find(p=>p.id===status.dataset.playlist)?.trackIds||[]:view.name==='favorites'?meta.likes:[...offline.ids];
+    if(status)status.textContent=offline.clearing?'Eliminando copias locales…':offline.running?`Descargando ${Math.min(offline.done+1,offline.total)} de ${offline.total}${offline.failed?' · '+offline.failed+' sin descargar':''}`:offline.message||`${scope.filter(id=>offline.ids.has(id)).length} de ${scope.length} canciones disponibles offline.`;
     $$('[data-offline-id]').forEach(el=>{const id=el.dataset.offlineId;el.textContent=offline.ids.has(id)?' · Offline':offline.pending.has(id)?' · Descargando…':'';});
     $$('[data-action="offline-all"]').forEach(b=>{b.disabled=offline.clearing||!!offline.running;});
     $$('[data-action="offline-clear"]').forEach(b=>{b.disabled=offline.clearing;});
+    const list=$('#aye-offline-list');if(list){const ids=unique([...offline.ids,...offline.pending]).filter(id=>tracks.has(id)),key=ids.join('|');if(list.dataset.ids!==key){list.dataset.ids=key;list.innerHTML=ids.length?trackRows(ids):empty('Todavía no hay descargas','Guardá canciones desde sus tres puntos o descargá una playlist.','','download');}}
   }
   async function downloadOffline(t,source,signal){
     const response=await fetch(mediaURL(t.albumId,source.name),{signal,mode:'cors',credentials:'omit',cache:'no-store'});
@@ -344,58 +364,63 @@
   }
   async function queueOffline(ids){
     const epoch=offline.epoch;await offline.ready;
-    if(epoch!==offline.epoch||offline.clearing)return;
+    if(epoch!==offline.epoch||offline.clearing||importBusy)return;
     if(!db.db){offline.message='Este navegador no permite guardar audio offline. Tus favoritas siguen guardadas.';updateOfflineUI();return;}
     if(!offline.running){offline.total=offline.done=offline.failed=0;offline.message='';}
-    for(const id of unique(ids))if(meta.likes.includes(id)&&!offline.pending.has(id)&&tracks.has(id)){
+    for(const id of unique(ids))if(!offline.pending.has(id)&&!offline.removing.has(id)&&tracks.has(id)){
       offline.pending.add(id);offline.queue.push(id);offline.total++;
     }
     if(!offline.queue.length){updateOfflineUI();return;}
     if(!offline.running){
       const run=(async()=>{
-        // El favorito se guarda antes de reservar espacio para el audio.
+        // La biblioteca se guarda antes de reservar espacio para el audio.
         await flush();
         while(offline.queue.length&&epoch===offline.epoch&&!offline.clearing){
           const id=offline.queue.shift();offline.active=id;updateOfflineUI();
           let timer=0;
           try{
-            if(!meta.likes.includes(id))continue;
+            if(!offline.pending.has(id)||!tracks.has(id))continue;
             if(await offlineRecord(id)){offline.ids.add(id);continue;}
             const t=tracks.get(id),sources=t?offlineSources(t):[];if(!sources.length)throw new Error('Sin versión liviana compatible (máximo 40 MB).');
             let record,lastError;
             for(const source of sources.slice(0,3)){
-              if(epoch!==offline.epoch||!meta.likes.includes(id))break;
+              if(epoch!==offline.epoch||!offline.pending.has(id))break;
               const controller=new AbortController();offline.controller=controller;timer=setTimeout(()=>controller.abort(),90000);
               try{record=await downloadOffline(t,source,controller.signal);break;}catch(e){lastError=e;if(controller.signal.aborted)break;}finally{clearTimeout(timer);}
             }
-            if(epoch!==offline.epoch||!meta.likes.includes(id))continue;
+            if(epoch!==offline.epoch||!offline.pending.has(id))continue;
             if(!record)throw lastError||new Error('No se pudo descargar.');
-            await db.offlineOp('put',id,record);offline.ids.add(id);
+            await db.offlineOp('put',id,record);
+            if(epoch!==offline.epoch||!offline.pending.has(id)){await db.offlineOp('delete',id);continue;}
+            offline.ids.add(id);
           }catch(e){
-            if(epoch===offline.epoch){offline.failed++;if(e?.name==='QuotaExceededError'){offline.message='No queda espacio para más audio. Las favoritas y las copias anteriores siguen intactas.';offline.queue=[];offline.pending.clear();}}
+            if(epoch===offline.epoch&&offline.pending.has(id)){offline.failed++;if(e?.name==='QuotaExceededError'){offline.message='No queda espacio para más audio. Tu biblioteca y las copias anteriores siguen intactas.';offline.queue=[];offline.pending.clear();}}
           }finally{clearTimeout(timer);offline.controller=null;offline.pending.delete(id);offline.done++;updateOfflineUI();}
         }
       })();
       offline.running=run;
       run.catch(()=>{offline.message='No se pudo completar la descarga. Tus favoritas siguen intactas.';}).finally(()=>{
-        if(offline.running===run){offline.running=null;offline.active='';if(epoch===offline.epoch&&!offline.message)offline.message=`${meta.likes.filter(id=>offline.ids.has(id)).length} favoritas offline.${offline.failed?' '+offline.failed+' no se descargaron; podés reintentar con Descargar todas.':''}`;updateOfflineUI();}
+        if(offline.running===run){offline.running=null;offline.active='';if(epoch===offline.epoch&&!offline.message)offline.message=`${offline.ids.size} canciones offline.${offline.failed?' '+offline.failed+' no se descargaron; podés reintentar con Descargar todas.':''}`;updateOfflineUI();}
       });
       navigator.storage?.persist?.().catch(()=>{});
     }
     updateOfflineUI();
   }
   async function removeOffline(id){
+    offline.removing.add(id);offline.pending.delete(id);
     if(offline.active===id)offline.controller?.abort();offline.queue=offline.queue.filter(x=>x!==id);
-    try{await db.offlineOp('delete',id);}catch{}offline.ids.delete(id);offline.pending.delete(id);offline.message='';updateOfflineUI();
+    try{await db.offlineOp('delete',id);offline.ids.delete(id);offline.message='Copia eliminada. Las playlists y favoritas se conservan.';}
+    catch{offline.message='No se pudo eliminar la copia local. Volvé a intentarlo.';}
+    finally{offline.removing.delete(id);updateOfflineUI();}
   }
   async function clearOffline(){
     offline.epoch++;offline.clearing=true;offline.queue=[];offline.pending.clear();offline.controller?.abort();updateOfflineUI();
-    try{await offline.ready;await offline.running?.catch(()=>{});await db.offlineOp('clear');offline.ids.clear();offline.message='Descargas eliminadas. Tus favoritas siguen guardadas.';}
+    try{await offline.ready;await offline.running?.catch(()=>{});await db.offlineOp('clear');offline.ids.clear();offline.message='Descargas eliminadas. Tu biblioteca sigue guardada.';}
     finally{offline.clearing=false;updateOfflineUI();}
   }
 
   function retainedLibrary(m,ts,as){
-    const tids=new Set([...(m?.likes||[]),...(m?.playlists||[]).flatMap(p=>p.trackIds),...(m?.history||[]).map(h=>h.id),...(m?.resume?.queue||[])]);
+    const tids=new Set([...(m?.likes||[]),...(m?.playlists||[]).flatMap(p=>p.trackIds),...(m?.history||[]).map(h=>h.id),...(m?.resume?.queue||[]),...offline.ids,...offline.pending]);
     const aids=new Set([...(m?.albumLikes||[]),...(m?.hiddenAlbums||[]),...(m?.recentAlbums||[]).map(a=>a.id)]);
     for(const id of m?.albumLikes||[])for(const tid of as.get(id)?.trackIds||[])tids.add(tid);
     const savedTracks=[...tids].map(id=>ts.get(id)).filter(Boolean);savedTracks.forEach(t=>aids.add(t.albumId));
@@ -879,7 +904,7 @@
       if(source&&!t.sources.some(s=>s.name===source.name))t.sources.push(source);
     }
     const list=[...groups.values()].map(cleanTrack).filter(Boolean).sort((a,b)=>a.disc-b.disc||a.number-b.number||a.sources[0].name.localeCompare(b.sources[0].name,undefined,{numeric:true}));
-    album.trackIds=list.map(t=>t.id);return {album,tracks:list,thumbnail:thumbnailAllowed(files,artwork)};
+    album.trackIds=list.map(t=>t.id);return {album,tracks:list,thumbnail:thumbnailAllowed(files,artwork),artworkRev:ARTWORK_REV};
   }
   async function loadAlbum(id,signal,force=false){
     if(!validId(id))throw new Error('El identificador de este álbum no es válido.');
@@ -891,7 +916,11 @@
     if(signal?.aborted||epoch!==dataEpoch)throw new DOMException('Cancelado','AbortError');
     const a=cleanAlbum(data.album);if(!a)throw new Error('No pudimos interpretar este álbum.');
     const list=(Array.isArray(data.tracks)?data.tracks:[]).map(cleanTrack).filter(Boolean);
-    reserveLibrary(list.map(t=>t.id),[a.id]);list.forEach(rememberTrack);rememberAlbum(a);if(typeof data.thumbnail==='boolean'){updateArtwork(id,a.cover,data.thumbnail);db.cachePut(`artwork:2.1.3:${id}`,{file:a.cover,thumb:data.thumbnail});}changed();return {album:a,tracks:list};
+    reserveLibrary(list.map(t=>t.id),[a.id]);list.forEach(rememberTrack);rememberAlbum(a);
+    if(data.artworkRev===ARTWORK_REV&&typeof data.thumbnail==='boolean'){
+      updateArtwork(id,a.cover,data.thumbnail);db.cachePut(`artwork:${ARTWORK_REV}:${id}`,{file:a.cover,thumb:data.thumbnail});
+    }else{a.coverState='unknown';queueArtwork(id);}
+    changed();return {album:a,tracks:list};
   }
 
   // Canciones: una mezcla progresiva de los discos encontrados, no un filtro del
@@ -1002,12 +1031,12 @@
   const attrs=(o={})=>Object.entries(o).map(([k,v])=>` data-${k}="${esc(v)}"`).join('');
   const btn=(label,action,data={},kind='smp-button',symbol='')=>`<button type="button" class="${kind}" data-action="${action}"${attrs(data)}>${symbol?icon(symbol):''}${esc(label)}</button>`;
   const ibtn=(label,action,data={},symbol='more',active=false)=>`<button type="button" class="smp-icon-button${active?' is-active':''}" data-action="${action}"${attrs(data)} aria-label="${esc(label)}"${['track-like','album-like'].includes(action)?` aria-pressed="${active}"`:''}>${icon(symbol)}</button>`;
-  // La metadata sigue validando fotografías/ilustraciones reales. La miniatura
-  // se descarga en paralelo, pero una onda genérica no se revela como portada.
+  // La miniatura sólo se revela con procedencia verificada en metadata.
   function findArtwork(files){
     const eligible=(Array.isArray(files)?files:[]).filter(f=>{
       if(!f||!validFile(f.name)||!/\.(jpe?g|png|webp)$/i.test(f.name)||[true,'true','1'].includes(f.private)||number(f.size)>8*1024*1024)return false;
-      if(/spectrogram|waveform/i.test(text(f.format))||/__ia_thumb|_spectrogram\.|_waveform\.|_itemimage\./i.test(f.name))return false;
+      if(/spectrogram|waveform|(?:JPEG|PNG)\s*Thumb|sprite/i.test(text(f.format))||/__ia_thumb|_spectrogram\.|_waveform\.|_itemimage\./i.test(f.name))return false;
+      if(/spectrogram|waveform|sprite|__ia_thumb/i.test(text(f.original)))return false;
       if(/(?:^|[/_. -])(?:waveform|spectrogram|spectra|sprite)(?:[/_. -]|$)/i.test(f.name))return false;
       return !/(?:^|[/_. -])(?:back|rear|thumb|thumbnail)(?:[/_. -]|$)/i.test(f.name);
     });
@@ -1017,11 +1046,21 @@
   // Validación de procedencia: nunca clasificar una portada por sus colores.
   const thumbnailProof=new Map();
   function thumbnailAllowed(files,file){
-    if(!file)return false;
-    const thumb=files.find(f=>/^__ia_thumb\./i.test(f.name||''));
-    if(!thumb?.original)return true;
-    const parent=files.find(f=>f.name===thumb.original)||{name:thumb.original};
-    return !!findArtwork([parent]);
+    if(!Array.isArray(files)||!file||findArtwork(files)!==file)return false;
+    // Conserva mayúsculas y nombres completos: no comparar sólo el basename.
+    const path=name=>typeof name==='string'?name.normalize('NFC').replace(/^(?:\.\/)+/,'').replace(/\/{2,}/g,'/'):'';
+    const resolve=name=>{
+      if(!name)return null;
+      let matches=files.filter(f=>f&&path(f.name)===path(name));
+      if(!matches.length&&/%[0-9a-f]{2}/i.test(name))try{const decoded=decodeURIComponent(name);matches=files.filter(f=>f&&path(f.name)===path(decoded));}catch{}
+      return matches.length===1?matches[0]:null;
+    };
+    const thumbs=files.filter(f=>f&&/^__ia_thumb\.(?:jpe?g|png|webp)$/i.test(path(f.name)));
+    if(thumbs.length!==1)return false;
+    const thumb=thumbs[0];
+    if(typeof thumb.original!=='string'||!thumb.original||[true,'true','1'].includes(thumb.private))return false;
+    const parent=resolve(thumb.original),selected=resolve(file);
+    return !!parent&&parent===selected&&findArtwork([parent])===parent.name;
   }
   const artworkJobs=new Map();let artworkActive=0,artworkObserver=null;
   const coverFallback=()=>/^https:\/\//i.test(COVER_FALLBACK_URL)?COVER_FALLBACK_URL:'';
@@ -1029,7 +1068,7 @@
   function cover(item,full=false){
     const id=item?.albumId||item?.id||'',stored=albums.get(id),proof=thumbnailProof.get(id),file=proof?proof.file:stored?.cover||item?.cover;
     const state=proof?(file?'real':'none'):(stored?.coverState==='none'||item?.coverState==='none'?'none':'unknown');
-    const src=state!=='none'&&proof?.thumb!==false&&validId(id)?thumbURL(id):coverFallback();
+    const src=state!=='none'&&proof?.thumb===true&&validId(id)?thumbURL(id):coverFallback();
     return `<span class="smp-cover aye-cover" data-cover-id="${esc(id)}" data-cover-state="${state}" data-cover-full="${full}" data-cover-file="${esc(file||'')}"><span class="aye-cover-fallback" aria-hidden="true"><b>A</b><small>AYELÉN</small></span>${src?`<img src="${esc(src)}" data-fallback="${esc(coverFallback())}" alt="${esc(item?.title||'Ayelén MP3')}" loading="${full?'eager':'lazy'}" decoding="async" fetchpriority="${full?'high':'auto'}"${state==='unknown'?' style="opacity:0"':''} referrerpolicy="no-referrer" />`:''}</span>`;
   }
   function promoteArtwork(el){
@@ -1050,22 +1089,25 @@
     job.promise.then(ok=>{
       if(!ok||!el.isConnected||el.dataset.coverFile!==file||el.dataset.coverState!=='real')return;
       let img=el.querySelector('img');if(!img){img=document.createElement('img');img.alt='Portada del álbum';img.decoding='async';el.append(img);}
-      img.dataset.thumb=thumbnailProof.get(id)?.thumb===false?coverFallback():thumbURL(id);img.dataset.fallback=coverFallback();img.dataset.hdApplied='1';img.hidden=false;img.style.opacity='1';img.src=url;
+      img.dataset.thumb=thumbnailProof.get(id)?.thumb===true?thumbURL(id):coverFallback();img.dataset.fallback=coverFallback();img.dataset.hdApplied='1';img.hidden=false;img.style.opacity='1';img.src=url;
     });
   }
-  function updateArtwork(id,file,thumb=!!file){
+  function updateArtwork(id,file,thumb=false){
+    file=findArtwork([{name:file}]);thumb=!!file&&thumb===true;
     thumbnailProof.set(id,{file,thumb});if(thumbnailProof.size>600)thumbnailProof.delete(thumbnailProof.keys().next().value);
     const a=albums.get(id);if(a){a.cover=file;a.coverState=file?'real':'none';dirtyAlbums.add(id);}
     for(const t of tracks.values())if(t.albumId===id){t.cover=file;t.coverState=file?'real':'none';dirtyTracks.add(t.id);}
     if(meta)changed();
     $$('[data-cover-id]').filter(el=>el.dataset.coverId===id).forEach(el=>{
+      delete el.dataset.artworkVisible;
       el.dataset.coverState=file?'real':'none';el.dataset.coverFile=file||'';
       let img=el.querySelector('img');
       if(file){
-        if(thumb){if(!img){img=document.createElement('img');img.alt='Portada del álbum';img.loading='lazy';img.decoding='async';img.src=thumbURL(id);el.append(img);}img.style.opacity='1';img.dataset.fallback=coverFallback();}
+        if(thumb){if(!img){img=document.createElement('img');img.alt='Portada del álbum';img.loading='lazy';img.decoding='async';el.append(img);}if(!img.dataset.hdApplied)img.src=thumbURL(id);img.hidden=false;img.style.opacity='1';img.dataset.fallback=coverFallback();}
         else if(img&&!img.dataset.hdApplied){if(coverFallback()){img.src=coverFallback();img.style.opacity='1';}else img.remove();}
         if(el.dataset.coverFull==='true'){if(artworkObserver)artworkObserver.observe(el);else if(el.getClientRects().length)promoteArtwork(el);}
       }else if(img){if(coverFallback()){img.src=coverFallback();img.style.opacity='1';}else img.remove();}
+      if(img?.isConnected&&img.complete&&img.naturalWidth&&!img.hidden&&img.style.opacity!=='0')el.dataset.artworkVisible='true';
     });
     if(currentTrack()?.albumId===id)updateMediaMetadata();
   }
@@ -1080,7 +1122,7 @@
     const next=[...artworkJobs].find(([,job])=>job.status==='queued');if(!next)return;
     const [id,job]=next,epoch=dataEpoch;job.status='loading';artworkActive++;
     (async()=>{
-      const key=`artwork:2.1.3:${id}`;
+      const key=`artwork:${ARTWORK_REV}:${id}`;
       let cached=await db.cached(key,86400000);
       if(!cached){cached=thumbnailProof.get(id);if(!cached){const data=await requestJSON(`https://archive.org/metadata/${encodeURIComponent(id)}/files`),files=data.result||data.files||[],file=findArtwork(files);cached={file,thumb:thumbnailAllowed(files,file)};}await db.cachePut(key,cached);}
       if(epoch===dataEpoch)updateArtwork(id,cached.file,cached.thumb);
@@ -1338,7 +1380,7 @@
   }
   let backView={name:'home',id:null};
   function navigate(name,id=null,{frame=null}={}){
-    if(!['home','search','library','favorites','history','settings','hidden','album','playlist'].includes(name))return;
+    if(!['home','search','library','favorites','history','settings','hidden','album','playlist','offline'].includes(name))return;
     if(!frame&&view.name===name&&view.id===id&&(browserNav.enabled||['search','album'].includes(name))){closePlayer();return;}
     if(!browserNav.restoring)saveBrowserEntry();
     if(name==='album'&&!frame)pushNavigation();
@@ -1359,7 +1401,7 @@
     if(!frame&&name==='album'&&view.name!=='album')backView={...view};
     albumController?.abort();viewSerial++;view={name,id};trackDisplayLimit=frame?.trackLimit||80;trackContext=[];libraryAlbumLimit=frame?.albumLimit||36;libraryPlaylistLimit=frame?.playlistLimit||40;
     $('#smp-player').hidden=true;setFullInert(false);
-    $$('.smp-desktop-nav [data-view],.smp-bottom-nav [data-view]').forEach(b=>{const active=b.dataset.view===name||(b.dataset.view==='library'&&name==='playlist');if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
+    $$('.smp-desktop-nav [data-view],.smp-bottom-nav [data-view]').forEach(b=>{const active=b.dataset.view===name||(b.dataset.view==='library'&&['playlist','offline'].includes(name));if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
     const cached=name==='search'&&searchPageCache?.state===searchState&&searchPageCache.revision===searchRevision?searchPageCache:null;
     if(cached){main.replaceChildren(cached.fragment);trackContext=cached.context;trackDisplayLimit=cached.limit;searchPageCache=null;}else renderView();
     if(frame)viewPositions.set(name+':'+(id||''),frame.top);
@@ -1394,6 +1436,7 @@
     else if(view.name==='library')renderLibrary();
     else if(view.name==='favorites')renderFavorites();
     else if(view.name==='playlist')renderPlaylist(view.id);
+    else if(view.name==='offline')renderOffline();
     else if(view.name==='history')renderHistory();
     else if(view.name==='settings')renderSettings();
     else if(view.name==='hidden')renderHidden();
@@ -1420,7 +1463,7 @@
   }
   function renderLibrary(){
     main.innerHTML=pageHead('Tu biblioteca','Un lugar para todo lo que querés volver a escuchar.',btn('Nueva playlist','playlist-new',{},'smp-button','plus'))+
-      `<div class="smp-stat-grid"><div class="smp-stat"><strong>${meta.likes.length}</strong><span>canciones favoritas</span></div><div class="smp-stat"><strong>${meta.albumLikes.length}</strong><span>álbumes guardados</span></div><div class="smp-stat"><strong>${meta.playlists.length}</strong><span>playlists tuyas</span></div></div><div class="smp-pills">${btn('Me gusta','navigate',{view:'favorites'},'smp-pill','heart')}${btn('Historial','navigate',{view:'history'},'smp-pill','history')}${btn('Exportar biblioteca','export',{},'smp-pill','download')}</div>`+
+      `<div class="smp-stat-grid"><div class="smp-stat"><strong>${meta.likes.length}</strong><span>canciones favoritas</span></div><div class="smp-stat"><strong>${meta.albumLikes.length}</strong><span>álbumes guardados</span></div><div class="smp-stat"><strong>${meta.playlists.length}</strong><span>playlists tuyas</span></div></div><div class="smp-pills">${btn('Me gusta','navigate',{view:'favorites'},'smp-pill','heart')}${btn('Historial','navigate',{view:'history'},'smp-pill','history')}${btn('Música offline','navigate',{view:'offline'},'smp-pill','download')}${btn('Exportar biblioteca','export',{},'smp-pill','download')}</div>`+
       sectionHead('Tus playlists','Para cada momento, una banda sonora.')+
       (meta.playlists.length?`<div class="smp-playlist-grid">${meta.playlists.slice(0,libraryPlaylistLimit).map(p=>`<button type="button" class="smp-playlist-card" data-action="playlist" data-id="${esc(p.id)}"><span>${icon('music')}</span><span><strong>${esc(p.name)}</strong><small>${p.trackIds.length} canciones</small></span></button>`).join('')}</div>${meta.playlists.length>libraryPlaylistLimit?`<div class="smp-load-more">${btn('Más playlists','library-playlists-more')}</div>`:''}`:empty('Dale un nombre a tu próxima playlist','Creala acá y sumá canciones desde el menú de cada tema.',btn('Crear mi primera playlist','playlist-new',{},'smp-button smp-primary','plus'),'list'))+
       sectionHead('Álbumes que se quedan')+(meta.albumLikes.length?albumCards(meta.albumLikes.slice(0,libraryAlbumLimit).map(id=>albums.get(id)).filter(Boolean))+(meta.albumLikes.length>libraryAlbumLimit?`<div class="smp-load-more">${btn('Más álbumes guardados','library-albums-more')}</div>`:''):empty('Todavía no guardaste discos','Tocá el corazón de un álbum y lo vas a encontrar acá.',btn('Descubrir música','navigate',{view:'search'}),'disc'));
@@ -1434,7 +1477,7 @@
     if(!p){navigate('library');return;}
     main.innerHTML=btn('Tu biblioteca','navigate',{view:'library'},'smp-text-button smp-back','back')+pageHead(p.name,`${p.trackIds.length} canciones · Creada el ${dateLabel(p.created)}`)+
       `<div class="smp-actions">${p.trackIds.length?btn('Reproducir','playlist-play',{id},'smp-button smp-primary','play'):''}${btn('Renombrar','playlist-rename',{id},'smp-button','edit')}${btn('Eliminar','playlist-delete',{id},'smp-text-button','trash')}</div>`+
-      (p.trackIds.length?trackRows(p.trackIds):empty('Esta playlist espera su primer tema','Buscá una canción, tocá sus tres puntos y elegí «Agregar a playlist».',btn('Buscar música','navigate',{view:'search'}),'list'));
+      offlineControls(id)+(p.trackIds.length?trackRows(p.trackIds):empty('Esta playlist espera su primer tema','Buscá una canción, tocá sus tres puntos y elegí «Agregar a playlist».',btn('Buscar música','navigate',{view:'search'}),'list'));updateOfflineUI();
   }
   function renderHistory(){
     const recent=unique(meta.history.map(h=>h.id));
@@ -1453,7 +1496,7 @@
       `<section class="smp-settings-group"><h2>Tu experiencia</h2><div class="smp-setting"><label for="smp-theme"><strong>Color de acento</strong><p>El mismo universo, otro tono.</p></label><select id="smp-theme" data-setting="theme">${[['coral','Atardecer coral'],['violet','Noche violeta'],['mint','Menta suave']].map(([v,l])=>`<option value="${v}"${s.theme===v?' selected':''}>${l}</option>`).join('')}</select></div><div class="smp-setting"><label for="smp-quality"><strong>Calidad preferida</strong><p>Se aplica al próximo tema. Depende de los archivos disponibles.</p></label><select id="smp-quality" data-setting="quality">${[['balanced','Equilibrada'],['saver','Ahorrar datos'],['best','Máxima disponible']].map(([v,l])=>`<option value="${v}"${s.quality===v?' selected':''}>${l}</option>`).join('')}</select></div><div class="smp-setting"><label for="aye-related-count"><strong>Cantidad de relacionados</strong><p>Máximo por álbum. Mostramos hasta cuatro al principio y el resto con Ver más, si hay buenas coincidencias.</p></label><select id="aye-related-count" data-setting="relatedCount">${RELATED_COUNTS.map(n=>`<option value="${n}"${s.relatedCount===n?' selected':''}>${n}</option>`).join('')}</select></div>${check('visualizer','Visualizadores reales','Analizan el sonido con Web Audio. Con visualizadores y EQ apagados, los próximos archivos usan audio nativo sin solicitar CORS.')}${check('musicOnly','Priorizar música','Oculta podcasts, entrevistas y audiolibros identificados por sus metadatos. Podés desactivarlo para ampliar la búsqueda.')}${check('remember','Recordar dónde quedaste','Guarda canción, cola y posición. La reproducción se retoma al tocar Play.')}${check('skipErrors','Saltar archivos que fallan','Prueba otra versión antes de avanzar. Se detiene después de tres canciones fallidas.')}</section>`+
       `<section class="smp-settings-group"><h2>Discos ocultos</h2><p class="smp-note">${meta.hiddenAlbums.length} discos fuera del inicio y las búsquedas. Se guardan en tus respaldos. Tus playlists y favoritos se conservan.</p>${btn('Administrar discos ocultos','navigate',{view:'hidden'},'smp-button','hide')}</section>`+
       `<section class="smp-settings-group"><h2>Tu biblioteca viaja con vos</h2><p class="smp-note">El respaldo incluye favoritos, playlists, historial, cola y ajustes. No incluye archivos de audio. Guardá una copia antes de cambiar de navegador, borrar sus datos o cambiar el dominio de tu blog.</p><div class="smp-actions">${btn('Exportar respaldo','export',{},'smp-button smp-primary','download')}${btn('Importar respaldo','import',{},'smp-button','upload')}</div><p class="smp-note">Podés combinar el respaldo con tu biblioteca actual o reemplazarla después de revisar su contenido.</p></section>`+
-      `<section class="smp-settings-group"><h2>Almacenamiento y privacidad</h2><p class="smp-note">${db.mode==='indexedDB'?'Guardado local activo (IndexedDB).':db.mode==='localStorage'?'Guardado local alternativo activo; el espacio disponible es menor.':'El navegador bloqueó el guardado: exportá tus datos antes de cerrar.'} Tus datos musicales quedan en este navegador y dominio. Las búsquedas, portadas y audios se solicitan a Internet Archive, que recibe esas conexiones. No usamos analítica ni cuentas propias.</p><div class="smp-actions">${btn('Limpiar caché de datos','cache-clear')}${btn('Eliminar música offline','offline-clear')}${btn('Restaurar ajustes','settings-reset')}${btn('Borrar todos mis datos','data-clear',{},'smp-button smp-danger','trash')}</div></section>`+
+      `<section class="smp-settings-group"><h2>Almacenamiento y privacidad</h2><p class="smp-note">${db.mode==='indexedDB'?'Guardado local activo (IndexedDB).':db.mode==='localStorage'?'Guardado local alternativo activo; el espacio disponible es menor.':'El navegador bloqueó el guardado: exportá tus datos antes de cerrar.'} Tus datos musicales quedan en este navegador y dominio. Las búsquedas, portadas y audios se solicitan a Internet Archive, que recibe esas conexiones. No usamos analítica ni cuentas propias.</p><div class="smp-actions">${btn('Limpiar caché de datos','cache-clear')}${btn('Administrar música offline','navigate',{view:'offline'})}${btn('Eliminar música offline','offline-clear')}${btn('Restaurar ajustes','settings-reset')}${btn('Borrar todos mis datos','data-clear',{},'smp-button smp-danger','trash')}</div></section>`+
       `<section class="smp-settings-group"><h2>Ayelén MP3 ${VERSION}</h2><p class="smp-note">Creado por Ayelén. La biblioteca es local; para reproducir necesitás conexión. La disponibilidad, licencias y metadatos de cada publicación dependen de Internet Archive. Consultá la página de origen antes de reutilizar un archivo.</p><p class="smp-note">En computadoras: espacio reproduce/pausa, ← y → retroceden o avanzan 10 segundos, y M silencia. Los controles de pantalla bloqueada dependen del navegador y de Android.</p><p class="smp-note">Para conservar la música en segundo plano, evitá cerrar esta pestaña. El sistema puede suspenderla para ahorrar batería.</p></section>`;
   }
   function updateSidebar(){
@@ -1645,7 +1688,7 @@
     n.output.connect(n.post);n.post.connect(ctx.destination);n.output.connect(n.meterSplit);n.meterSplit.connect(n.left,0);n.meterSplit.connect(n.right,1);
     n.freq=new Uint8Array(n.post.frequencyBinCount);n.preFreq=new Uint8Array(n.pre.frequencyBinCount);n.timeL=new Float32Array(n.left.fftSize);n.timeR=new Float32Array(n.right.fftSize);
     n.responseFreq=Float32Array.from({length:192},(_,i)=>20*Math.pow(Math.min(20000,ctx.sampleRate*.49)/20,i/191));n.magnitude=new Float32Array(192);n.phase=new Float32Array(192);
-    n.dispose=()=>{clearTimeout(n.virtualTimer);clearTimeout(n.irTimer);clearTimeout(n.bypassTimer);clearTimeout(n.responseTimer);if(n.convolver)n.convolver.buffer=null;n.irCache.clear();n.all.forEach(node=>{try{node.disconnect();}catch{}});};
+    n.dispose=()=>{clearTimeout(n.surroundTimer);clearTimeout(n.virtualTimer);clearTimeout(n.irTimer);clearTimeout(n.bypassTimer);clearTimeout(n.responseTimer);if(n.convolver)n.convolver.buffer=null;n.irCache.clear();n.all.forEach(node=>{try{node.disconnect();}catch{}});};
     return n;
   }
   function buildProcessing(n,ctx){
@@ -1710,6 +1753,24 @@
     smoothParam(n.virtualDry.gain,on?0:1,ctx,immediate);smoothParam(n.virtualWet.gain,on?1/1.4:0,ctx,immediate);
     if(!on&&n.virtualConnected){const stop=()=>{if(n.virtualOn)return;try{n.virtualInput.disconnect(n.virtualSplit);}catch{}n.virtualConnected=false;};if(immediate)stop();else n.virtualTimer=setTimeout(stop,60);}
   }
+  function configureSurround(n,ctx,on,immediate){
+    if(!n.built)return;
+    if(on&&!n.surroundWet){
+      n.surroundSplit=n.make('ChannelSplitter');const mid=n.gain(1);mid.channelCount=1;mid.channelCountMode='explicit';
+      for(let i=0;i<2;i++){const half=n.gain(.5);n.surroundSplit.connect(half,i);half.connect(mid);}
+      const hp=n.filter('highpass',220,.707),lp=n.filter('lowpass',6200,.707),side=n.gain(1);mid.connect(hp);hp.connect(lp);
+      // Reflexiones decorrelacionadas de banda limitada; cancelan al sumar a mono.
+      // Sin feedback, sin otra fuente, antes del compresor y limitador existentes.
+      for(const [time,amount] of [[.008,.18],[.013,-.12]]){const delay=ctx.createDelay(.03);n.all.push(delay);delay.delayTime.value=time;const level=n.gain(amount);lp.connect(delay);delay.connect(level);level.connect(side);}
+      const merge=n.make('ChannelMerger'),inverse=n.gain(-1);side.connect(merge,0,0);side.connect(inverse);inverse.connect(merge,0,1);
+      n.surroundWet=n.gain(0);merge.connect(n.surroundWet);n.surroundWet.connect(n.crossOut);n.surroundConnected=false;
+    }
+    if(!n.surroundWet)return;
+    clearTimeout(n.surroundTimer);n.surroundOn=on;
+    if(on&&!n.surroundConnected){n.color.connect(n.surroundSplit);n.surroundConnected=true;}
+    smoothParam(n.surroundWet.gain,on?1:0,ctx,immediate);
+    if(!on&&n.surroundConnected){const stop=()=>{if(n.surroundOn)return;try{n.color.disconnect(n.surroundSplit);}catch{}n.surroundConnected=false;};if(immediate)stop();else n.surroundTimer=setTimeout(stop,60);}
+  }
   function smoothParam(param,value,ctx,immediate=false){
     const now=ctx.currentTime;
     if(immediate){param.cancelScheduledValues(now);param.setValueAtTime(value,now);return;}
@@ -1761,6 +1822,7 @@
       param(n.limiter.threshold,e.ceiling);gain(n.limitDry,e.limiter?0:1);gain(n.limitWet,e.limiter?1:0);
       if(n.ceilingDb!==e.ceiling){const curve=new Float32Array(4097),peak=Math.pow(10,e.ceiling/20),knee=.8*peak;for(let i=0;i<curve.length;i++){const x=i*2/(curve.length-1)-1,a=Math.abs(x);curve[i]=a<=knee?x:Math.sign(x)*(knee+(peak-knee)*Math.tanh((a-knee)/(peak-knee)));}n.ceiling.curve=curve;n.ceilingDb=e.ceiling;}
     }
+    configureSurround(n,ctx,enabled&&e.surround,immediate);
     configureVirtualizer(n,ctx,enabled&&e.virtualizer,immediate);
     gain(n.dry,enabled?0:1);gain(n.wet,enabled?1:0);
     if(!enabled&&n.processing){const disconnect=()=>{if(n.wet.gain.value>.001)return;try{n.input.disconnect(n.preamp);}catch{}n.processing=false;clearTimeout(n.irTimer);n.convolver.buffer=null;};if(immediate)disconnect();else n.bypassTimer=setTimeout(disconnect,60);}
@@ -1867,7 +1929,7 @@
     return `<label class="aye-eq-control"><span>${esc(label)}<output data-eq-output="${key}">${esc(value+unit)}</output></span><input type="range" data-sound="${key}" data-unit="${esc(unit)}" min="${min}" max="${max}" step="${step}" value="${value}" aria-label="${esc(label)}" /></label>`;
   }
   function eqCheck(key,label){return `<label class="aye-eq-check"><span>${esc(label)}</span><input type="checkbox" data-sound-check="${key}"${meta.settings.equalizer[key]?' checked':''} /></label>`;}
-  function quickPresets(){return `<div class="aye-quick-presets" aria-label="Presets rápidos de sonido">${['rock','virtualizer','pop','live','reset'].map(id=>`<button type="button" data-action="sound-preset" data-preset="${id}" aria-pressed="false">${id==='virtualizer'?'Virtualizer':id.toUpperCase()}</button>`).join('')}</div>`;}
+  function quickPresets(){return `<div class="aye-quick-presets" aria-label="Presets rápidos de sonido">${['rock','pop','live','virtualizer','surround','reset'].map(id=>`<button type="button" data-action="sound-preset" data-preset="${id}" aria-pressed="false">${id==='virtualizer'?'Virtualizer':id.toUpperCase()}</button>`).join('')}</div>`;}
   function showEqualizer(){
     const e=meta.settings.equalizer;
     const simpleGroups=[['bass','Graves'],['mid','Medios'],['treble','Agudos']];
@@ -1886,6 +1948,7 @@
   function setEqualizer(patch,{retry=false,manual=true}={}){
     if(importBusy)return;
     if(manual&&Object.keys(patch).some(k=>!['mode','enabled','preset'].includes(k))){
+      if(meta.settings.equalizer.surround)meta.settings.equalizer=equalizerFrom({...EQ_DEFAULTS,mode:meta.settings.equalizer.mode});
       patch={...patch,enabled:true};
       if(['bands','legacy','q','parametric'].some(k=>Object.hasOwn(patch,k)))patch.preset='custom';
     }
@@ -1903,6 +1966,13 @@
   }
   function applySoundPreset(id){
     if(id==='reset'){resetSound();return;}
+    if(id==='surround'){
+      const e=meta.settings.equalizer;
+      const next=e.surround&&e.enabled?{...(e.surroundBase||EQ_DEFAULTS),mode:e.mode}:e.surround?{...e,enabled:true}:{...EQ_DEFAULTS,...SURROUND_SETTINGS,mode:e.mode,enabled:true,surround:true,surroundBase:structuredClone(e)};
+      setEqualizer(next,{manual:false});if(dialog.open&&$('#smp-equalizer'))showEqualizer();return;
+    }
+    if(!['live','virtualizer','flat',...EQ_PRESETS.map(p=>p.id)].includes(id))return;
+    if(meta.settings.equalizer.surround)meta.settings.equalizer=equalizerFrom({...EQ_DEFAULTS,mode:meta.settings.equalizer.mode});
     const e=meta.settings.equalizer;
     if(id==='live'){
       if(e.enabled&&e.live)setEqualizer({...liveBaseFrom(e.liveBase),live:false,liveBase:null},{manual:false});
@@ -1934,7 +2004,7 @@
     $$('[data-action="sound-preset"]').forEach(b=>{const chosen=b.dataset.preset==='reset'?!e.enabled||!eqHasProcessing(e):b.dataset.preset==='live'?e.enabled&&e.live:b.dataset.preset==='virtualizer'?e.enabled&&e.virtualizer:e.enabled&&e.preset===b.dataset.preset;b.setAttribute('aria-pressed',String(chosen));});
     const panel=dialog?.open?$('#smp-equalizer'):null;if(!panel)return;
     $('#smp-eq-enabled').checked=e.enabled;
-    const label=$('#smp-eq-preset-label');label.textContent=[EQ_PRESETS.find(p=>p.id===tonePreset(e))?.name||(tonePreset(e)==='flat'?'Flat':'EQ personalizado'),e.live?'LIVE':'',e.virtualizer?'Virtualizer':''].filter(Boolean).join(' · ');
+    const label=$('#smp-eq-preset-label');label.textContent=e.surround?'SURROUND · modo exclusivo':[EQ_PRESETS.find(p=>p.id===tonePreset(e))?.name||(tonePreset(e)==='flat'?'Flat':'EQ personalizado'),e.live?'LIVE':'',e.virtualizer?'Virtualizer':''].filter(Boolean).join(' · ');
     const tone=panel.querySelector('[data-eq-tone]');if(tone)tone.value=tonePreset(e);
     panel.querySelectorAll('[data-sound]').forEach(el=>{const v=e[el.dataset.sound];if(document.activeElement!==el)el.value=v;const out=panel.querySelector(`[data-eq-output="${el.dataset.sound}"]`);if(out)out.textContent=Number(v).toLocaleString('es-AR',{maximumFractionDigits:2})+(el.dataset.unit||'');});
     panel.querySelectorAll('[data-sound-check]').forEach(el=>el.checked=e[el.dataset.soundCheck]);
@@ -2330,7 +2400,9 @@
     if(!tracks.has(id))return;
     const liked=meta.likes.includes(id);meta.likes=liked?meta.likes.filter(x=>x!==id):[id,...meta.likes];changed();
     toast(liked?'Quitada de tus favoritas.':'Esta se queda con vos.');rerenderKeepingScroll();
-    if(liked)removeOffline(id);else queueOffline([id]);
+    // La copia puede compartirse con playlists o haberse guardado por separado.
+    // Quitar un corazón no elimina audio solicitado desde otra sección.
+    if(!liked)queueOffline([id]);
   }
   function toggleAlbumLike(id){
     if(!albums.has(id))return;
@@ -2353,7 +2425,7 @@
   function trackMenu(id){
     const t=tracks.get(id);if(!t)return;
     const p=view.name==='playlist'?meta.playlists.find(p=>p.id===view.id):null;
-    showDialog(t.title,`<p class="smp-note">${esc(t.artist)} · ${esc(t.album)}</p><div class="smp-menu">${btn(meta.likes.includes(id)?'Quitar de Me gusta':'Agregar a Me gusta','menu-like',{id},'smp-menu-item','heart')}${btn('Agregar a playlist','track-add',{id},'smp-menu-item','plus')}${btn('Reproducir a continuación','queue-add-next',{id},'smp-menu-item','next')}${btn('Agregar al final de la cola','queue-add',{id},'smp-menu-item','queue')}${btn('Ir al álbum','menu-album',{id:t.albumId},'smp-menu-item','disc')}${artistMenu(t.artist)}${btn(hiddenAlbums.has(t.albumId)?'Volver a mostrar este álbum':'No mostrar más este álbum',hiddenAlbums.has(t.albumId)?'album-unhide':'album-hide',{id:t.albumId},'smp-menu-item',hiddenAlbums.has(t.albumId)?'eye':'hide')}${btn('Descargar canción','track-download',{id},'smp-menu-item','download')}${p?btn('Quitar de esta playlist','playlist-remove',{id:p.id,track:id},'smp-menu-item','trash')+btn('Mover hacia arriba','playlist-up',{id:p.id,track:id},'smp-menu-item','up'):''}<a class="smp-menu-item" href="${detailsURL(t.albumId)}" target="_blank" rel="noopener noreferrer">${icon('external')}Ver en Internet Archive</a></div>`);
+    showDialog(t.title,`<p class="smp-note">${esc(t.artist)} · ${esc(t.album)}</p><div class="smp-menu">${btn(meta.likes.includes(id)?'Quitar de Me gusta':'Agregar a Me gusta','menu-like',{id},'smp-menu-item','heart')}${btn('Agregar a playlist','track-add',{id},'smp-menu-item','plus')}${btn('Reproducir a continuación','queue-add-next',{id},'smp-menu-item','next')}${btn('Agregar al final de la cola','queue-add',{id},'smp-menu-item','queue')}${btn('Ir al álbum','menu-album',{id:t.albumId},'smp-menu-item','disc')}${artistMenu(t.artist)}${btn(hiddenAlbums.has(t.albumId)?'Volver a mostrar este álbum':'No mostrar más este álbum',hiddenAlbums.has(t.albumId)?'album-unhide':'album-hide',{id:t.albumId},'smp-menu-item',hiddenAlbums.has(t.albumId)?'eye':'hide')}${offlineMenu(id)}${btn('Descargar canción','track-download',{id},'smp-menu-item','download')}${p?btn('Quitar de esta playlist','playlist-remove',{id:p.id,track:id},'smp-menu-item','trash')+btn('Mover hacia arriba','playlist-up',{id:p.id,track:id},'smp-menu-item','up'):''}<a class="smp-menu-item" href="${detailsURL(t.albumId)}" target="_blank" rel="noopener noreferrer">${icon('external')}Ver en Internet Archive</a></div>`);
   }
   function downloadTrack(id){
     const t=tracks.get(id);if(!t)return;
@@ -2365,7 +2437,7 @@
   }
   function librarySnapshot(){
     saveResume(true);
-    const neededTracks=new Set([...meta.likes,...meta.playlists.flatMap(p=>p.trackIds),...meta.history.map(h=>h.id),...(meta.resume?.queue||[])]);
+    const neededTracks=new Set([...meta.likes,...meta.playlists.flatMap(p=>p.trackIds),...meta.history.map(h=>h.id),...(meta.resume?.queue||[]),...offline.ids]);
     const neededAlbums=new Set([...meta.albumLikes,...meta.hiddenAlbums,...meta.recentAlbums.map(a=>a.id)]);
     for(const id of meta.albumLikes)(albums.get(id)?.trackIds||[]).forEach(t=>neededTracks.add(t));
     const savedTracks=[...neededTracks].map(id=>tracks.get(id)).filter(Boolean);savedTracks.forEach(t=>neededAlbums.add(t.albumId));
@@ -2570,7 +2642,10 @@
       case 'import':$('#smp-import-file').click();break;
       case 'import-merge':await applyImport(false);break;
       case 'import-replace':confirmDialog('¿Reemplazar tu biblioteca?','Se reemplazarán los datos de esta app por los del respaldo y se detendrá la música. Exportá primero si querés conservar lo actual.',()=>applyImport(true),'Reemplazar',true);break;
-      case 'offline-all':queueOffline(meta.likes);break;
+      case 'offline-all':queueOffline(id?meta.playlists.find(p=>p.id===id)?.trackIds||[]:meta.likes);break;
+      case 'offline-track':closeDialog();queueOffline([id]);break;
+      case 'offline-remove':closeDialog();await removeOffline(id);break;
+      case 'offline-play':{const ids=[...offline.ids].filter(id=>tracks.has(id));if(ids.length)playQueue(ids,0);else toast('Todavía no hay canciones descargadas.');break;}
       case 'offline-clear':await clearOffline();break;
       case 'cache-clear':await db.clearCache();toast('Caché limpio. Tu biblioteca sigue intacta.');break;
       case 'history-clear':confirmDialog('¿Borrar tu historial?','Se borrarán el historial, los álbumes recientes y las estadísticas. Tus playlists y favoritos se conservan.',()=>{meta.history=[];meta.recentAlbums=[];meta.seconds=0;meta.plays=0;changed();renderHistory();},'Borrar historial',true);break;
@@ -2643,8 +2718,12 @@
       }
       if(el.id==='smp-import-file')importFile(el.files[0]);
     });
+    root.addEventListener('load',e=>{
+      const img=e.target;if(img.tagName==='IMG'&&img.closest('.aye-cover')&&img.style.opacity!=='0'&&!img.hidden)img.closest('.aye-cover').dataset.artworkVisible='true';
+    },true);
     root.addEventListener('error',e=>{
       const img=e.target;if(img.tagName!=='IMG')return;
+      const frame=img.closest('.aye-cover');if(frame)delete frame.dataset.artworkVisible;
       if(img.dataset.hdApplied==='1'&&img.dataset.thumb){delete img.dataset.hdApplied;img.src=img.dataset.thumb;return;}
       if(!img.dataset.triedFallback&&img.dataset.fallback&&img.src!==img.dataset.fallback){img.dataset.triedFallback='1';img.src=img.dataset.fallback;}
       else{img.hidden=true;img.removeAttribute('src');}
