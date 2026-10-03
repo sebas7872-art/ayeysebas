@@ -1,13 +1,13 @@
 /*
- * Ayelén MP3 2.1.4 · Reproductor personal
+ * Ayelén MP3 2.1.5 · Reproductor personal
  * JavaScript nativo; sin compilación, claves, backend ni dependencias externas.
  * Secciones: utilidades / modelo y persistencia / Archive / interfaz / audio / acciones.
  * Las URLs de medios se construyen desde identificadores y nombres, nunca desde HTML remoto.
  */
 (() => {
   'use strict';
-  const VERSION = '2.1.4';
-  const ARTWORK_REV = '2.1.4';
+  const VERSION = '2.1.5';
+  const ARTWORK_REV = '2.1.5';
   const DB_NAME = 'sanavera-mp3-v2';
   const RESUME_KEY = 'smp.v2.resume';
   const FALLBACK_KEY = 'smp.v2.fallback';
@@ -16,11 +16,11 @@
   // CONFIGURACIÓN DEL INICIO / BÚSQUEDAS ALEATORIAS
   // Editá estas seis posiciones. Los espacios vacíos se ignoran automáticamente.
   const HOME_SEARCH_SEEDS = [
-    "Leader music",
-    "Sin miedo",
-    "Un poco de ruido",
-    "Patricio rey y sus redonditos de ricota",
-    "Grandes exitos",
+    "grandes éxitos",
+    "",
+    "",
+    "",
+    "",
     ""
   ];
   const homeSeeds = [...new Set(HOME_SEARCH_SEEDS.filter(s=>typeof s==='string').map(s=>s.trim()).filter(Boolean))];
@@ -43,10 +43,9 @@
   ];
   const LIVE_SETTINGS=Object.freeze({width:160,reverb:40,reverbTime:3,preDelay:45,autoGain:false});
   const VIRTUAL_SETTINGS=Object.freeze({bassEnhancer:0,trebleExciter:0,presence:0,width:160,crossfeed:0,reverb:0,reverbTime:1.4,preDelay:18,midGain:0,sideGain:6,compressor:false,parametric:Object.freeze([])});
-  // Sonido propio de Ayelén, inspirado en equipos estéreo; no emulación de Sony.
-  // Receta exclusiva: graves centrales, laterales filtrados, reflexiones cortas
-  // antes de la dinámica/limitador. Todos los demás efectos parten de neutro.
-  const SURROUND_SETTINGS=Object.freeze({bands:Object.freeze([0,2.5,2,0,-.5,0,1,1.5,1,0]),preamp:-3,q:.85,width:145,presence:.5,bassEnhancer:8,trebleExciter:4,reverb:8,reverbTime:.45,preDelay:12,compressor:true,threshold:-19,ratio:2.2,attack:15,release:180,knee:12,makeup:3,limiter:true,ceiling:-1.2,preset:'surround',parametric:Object.freeze([{id:'surround-bass-center',type:'highpass',frequency:150,gain:0,q:.707,channel:'side',enabled:true}])});
+  // SURROUND: configuración manual validada por el usuario. Exclusiva, sin
+  // espacializadores adicionales. Makeup +3 dB permanece activo sin compresión.
+  const SURROUND_SETTINGS=Object.freeze({bands:Object.freeze(Array(10).fill(0)),legacy:Object.freeze([0,0,0]),preamp:0,q:1.4,autoGain:false,bassEnhancer:0,trebleExciter:0,presence:0,width:160,crossfeed:0,reverb:10,reverbTime:1.4,preDelay:18,compressor:false,threshold:-18,ratio:3,attack:10,release:180,knee:6,makeup:3,limiter:false,ceiling:-1,midGain:0,sideGain:6,preset:'surround',parametric:Object.freeze([{id:'surround-presence',type:'peaking',frequency:11674,gain:12,q:1,channel:'stereo',enabled:true}])});
   function virtualBaseFrom(value){
     const clean=equalizerFrom({...value,virtualizer:false,virtualBase:null});
     return Object.fromEntries(Object.keys(VIRTUAL_SETTINGS).map(k=>[k,clean[k]]));
@@ -1031,43 +1030,67 @@
   const attrs=(o={})=>Object.entries(o).map(([k,v])=>` data-${k}="${esc(v)}"`).join('');
   const btn=(label,action,data={},kind='smp-button',symbol='')=>`<button type="button" class="${kind}" data-action="${action}"${attrs(data)}>${symbol?icon(symbol):''}${esc(label)}</button>`;
   const ibtn=(label,action,data={},symbol='more',active=false)=>`<button type="button" class="smp-icon-button${active?' is-active':''}" data-action="${action}"${attrs(data)} aria-label="${esc(label)}"${['track-like','album-like'].includes(action)?` aria-pressed="${active}"`:''}>${icon(symbol)}</button>`;
-  // La miniatura sólo se revela con procedencia verificada en metadata.
+  // Procedencia por metadata, sin analizar colores ni asumir que HTTP 200 es artwork.
+  function artworkFiles(files){
+    const list=(Array.isArray(files)?files:[]).filter(f=>f&&validFile(f.name));
+    const path=name=>typeof name==='string'?name.normalize('NFC').replace(/^(?:\.\/)+/,'').replace(/\/{2,}/g,'/'):'';
+    const names=new Map();for(const f of list){const key=path(f.name);names.set(key,names.has(key)?null:f);}
+    const resolve=name=>{const key=path(name);if(names.has(key))return names.get(key);if(/%[0-9a-f]{2}/i.test(key))try{return names.get(path(decodeURIComponent(key)))||null;}catch{}return null;};
+    const imageName=name=>/\.(jpe?g|png|webp)$/i.test(name||'');
+    const mediaName=name=>/\.(mp3|wav|wave|flac|m4a|m4b|aac|ogg|oga|opus|aiff?|alac|wma|ape|mp4|m4v|mpe?g|webm|ogv|avi|mov|mkv)$/i.test(name||'');
+    const technical=f=>/spectrogram|waveform|spectra|sprite|(?:^|\s)Thumbnail(?:$|\s)/i.test(text(f.format))||/(?:^|[/_. -])(?:waveform|spectrogram|spectra|sprite)(?:[/_. -]|$)|_itemimage\.|\.thumbs\//i.test(f.name);
+    const publicImage=f=>f&&imageName(f.name)&&![true,'true','1'].includes(f.private)&&number(f.size)<=8*1024*1024;
+    const origin=(f,seen=new Set())=>{
+      if(!publicImage(f)||technical(f)||seen.has(f.name)||seen.size>=8)return null;
+      seen.add(f.name);
+      if(f.original){
+        if(typeof f.original!=='string'||mediaName(f.original))return null;
+        const parent=resolve(f.original);return parent?origin(parent,seen):null;
+      }
+      // PNG derivados con vínculo omitido: un audio homónimo / spectrogram
+      // compañero también demuestra origen técnico; no son una fotografía.
+      const stem=f.name.replace(/\.[^.]+$/,'');
+      if(/\.png$/i.test(f.name)&&f.source!=='original'&&list.some(p=>p.name===stem+'_spectrogram.png'||(mediaName(p.name)&&p.name.replace(/\.[^.]+$/,'')===stem)))return null;
+      return f;
+    };
+    const candidate=f=>{
+      if(!publicImage(f)||/__ia_thumb|_itemimage\./i.test(f.name)||/(?:JPEG|PNG)\s*Thumb|Item Tile/i.test(text(f.format)))return false;
+      if(/(?:^|[/_. -])(?:back|rear|thumb|thumbnail)(?:[/_. -]|$)/i.test(f.name))return false;
+      const base=origin(f);return !!base&&!/__ia_thumb/i.test(base.name);
+    };
+    return {list,path,resolve,origin,candidate,publicImage};
+  }
+  // La portada HD se elige entre imágenes, nunca entre dibujos derivados del audio.
   function findArtwork(files){
-    const eligible=(Array.isArray(files)?files:[]).filter(f=>{
-      if(!f||!validFile(f.name)||!/\.(jpe?g|png|webp)$/i.test(f.name)||[true,'true','1'].includes(f.private)||number(f.size)>8*1024*1024)return false;
-      if(/spectrogram|waveform|(?:JPEG|PNG)\s*Thumb|sprite/i.test(text(f.format))||/__ia_thumb|_spectrogram\.|_waveform\.|_itemimage\./i.test(f.name))return false;
-      if(/spectrogram|waveform|sprite|__ia_thumb/i.test(text(f.original)))return false;
-      if(/(?:^|[/_. -])(?:waveform|spectrogram|spectra|sprite)(?:[/_. -]|$)/i.test(f.name))return false;
-      return !/(?:^|[/_. -])(?:back|rear|thumb|thumbnail)(?:[/_. -]|$)/i.test(f.name);
-    });
+    const a=artworkFiles(files),eligible=a.list.filter(a.candidate);
     const score=f=>(/(?:front|cover|portada|folder)/i.test(f.name)?20:0)+(f.source==='original'?4:0);
     eligible.sort((a,b)=>score(b)-score(a));return eligible[0]?.name||'';
   }
-  // Validación de procedencia: nunca clasificar una portada por sus colores.
   const thumbnailProof=new Map();
   function thumbnailAllowed(files,file){
-    if(!Array.isArray(files)||!file||findArtwork(files)!==file)return false;
-    // Conserva mayúsculas y nombres completos: no comparar sólo el basename.
-    const path=name=>typeof name==='string'?name.normalize('NFC').replace(/^(?:\.\/)+/,'').replace(/\/{2,}/g,'/'):'';
-    const resolve=name=>{
-      if(!name)return null;
-      let matches=files.filter(f=>f&&path(f.name)===path(name));
-      if(!matches.length&&/%[0-9a-f]{2}/i.test(name))try{const decoded=decodeURIComponent(name);matches=files.filter(f=>f&&path(f.name)===path(decoded));}catch{}
-      return matches.length===1?matches[0]:null;
-    };
-    const thumbs=files.filter(f=>f&&/^__ia_thumb\.(?:jpe?g|png|webp)$/i.test(path(f.name)));
-    if(thumbs.length!==1)return false;
+    if(!file)return false;
+    const a=artworkFiles(files),selected=a.resolve(file);
+    if(!selected||!a.candidate(selected))return false;
+    const thumbs=a.list.filter(f=>/^__ia_thumb\.(?:jpe?g|png|webp)$/i.test(a.path(f.name)));
+    if(thumbs.length!==1||!a.publicImage(thumbs[0]))return false;
     const thumb=thumbs[0];
-    if(typeof thumb.original!=='string'||!thumb.original||[true,'true','1'].includes(thumb.private))return false;
-    const parent=resolve(thumb.original),selected=resolve(file);
-    return !!parent&&parent===selected&&findArtwork([parent])===parent.name;
+    if(thumb.original){
+      const base=a.origin(thumb);
+      // Puede derivar de otra portada legítima o pasar por un JPEG Thumb.
+      return !!base&&base!==thumb&&a.candidate(base);
+    }
+    // Patrón real de Archive: Item Tile subido como "original", sin padre.
+    // Se acepta sólo acompañado por al menos una imagen real, no por PNG de audio.
+    if(!/^Item Tile$/i.test(text(thumb.format))||thumb.source!=='original')return false;
+    return a.list.some(f=>a.candidate(f)&&a.origin(f)?.source==='original');
   }
   const artworkJobs=new Map();let artworkActive=0,artworkObserver=null;
   const coverFallback=()=>/^https:\/\//i.test(COVER_FALLBACK_URL)?COVER_FALLBACK_URL:'';
   const artworkHD=new Map();
   function cover(item,full=false){
     const id=item?.albumId||item?.id||'',stored=albums.get(id),proof=thumbnailProof.get(id),file=proof?proof.file:stored?.cover||item?.cover;
-    const state=proof?(file?'real':'none'):(stored?.coverState==='none'||item?.coverState==='none'?'none':'unknown');
+    // Los estados guardados en álbumes/pistas no certifican la revisión actual.
+    const state=proof?(file?'real':'none'):'unknown';
     const src=state!=='none'&&proof?.thumb===true&&validId(id)?thumbURL(id):coverFallback();
     return `<span class="smp-cover aye-cover" data-cover-id="${esc(id)}" data-cover-state="${state}" data-cover-full="${full}" data-cover-file="${esc(file||'')}"><span class="aye-cover-fallback" aria-hidden="true"><b>A</b><small>AYELÉN</small></span>${src?`<img src="${esc(src)}" data-fallback="${esc(coverFallback())}" alt="${esc(item?.title||'Ayelén MP3')}" loading="${full?'eager':'lazy'}" decoding="async" fetchpriority="${full?'high':'auto'}"${state==='unknown'?' style="opacity:0"':''} referrerpolicy="no-referrer" />`:''}</span>`;
   }
@@ -1688,7 +1711,7 @@
     n.output.connect(n.post);n.post.connect(ctx.destination);n.output.connect(n.meterSplit);n.meterSplit.connect(n.left,0);n.meterSplit.connect(n.right,1);
     n.freq=new Uint8Array(n.post.frequencyBinCount);n.preFreq=new Uint8Array(n.pre.frequencyBinCount);n.timeL=new Float32Array(n.left.fftSize);n.timeR=new Float32Array(n.right.fftSize);
     n.responseFreq=Float32Array.from({length:192},(_,i)=>20*Math.pow(Math.min(20000,ctx.sampleRate*.49)/20,i/191));n.magnitude=new Float32Array(192);n.phase=new Float32Array(192);
-    n.dispose=()=>{clearTimeout(n.surroundTimer);clearTimeout(n.virtualTimer);clearTimeout(n.irTimer);clearTimeout(n.bypassTimer);clearTimeout(n.responseTimer);if(n.convolver)n.convolver.buffer=null;n.irCache.clear();n.all.forEach(node=>{try{node.disconnect();}catch{}});};
+    n.dispose=()=>{clearTimeout(n.virtualTimer);clearTimeout(n.irTimer);clearTimeout(n.bypassTimer);clearTimeout(n.responseTimer);if(n.convolver)n.convolver.buffer=null;n.irCache.clear();n.all.forEach(node=>{try{node.disconnect();}catch{}});};
     return n;
   }
   function buildProcessing(n,ctx){
@@ -1753,24 +1776,6 @@
     smoothParam(n.virtualDry.gain,on?0:1,ctx,immediate);smoothParam(n.virtualWet.gain,on?1/1.4:0,ctx,immediate);
     if(!on&&n.virtualConnected){const stop=()=>{if(n.virtualOn)return;try{n.virtualInput.disconnect(n.virtualSplit);}catch{}n.virtualConnected=false;};if(immediate)stop();else n.virtualTimer=setTimeout(stop,60);}
   }
-  function configureSurround(n,ctx,on,immediate){
-    if(!n.built)return;
-    if(on&&!n.surroundWet){
-      n.surroundSplit=n.make('ChannelSplitter');const mid=n.gain(1);mid.channelCount=1;mid.channelCountMode='explicit';
-      for(let i=0;i<2;i++){const half=n.gain(.5);n.surroundSplit.connect(half,i);half.connect(mid);}
-      const hp=n.filter('highpass',220,.707),lp=n.filter('lowpass',6200,.707),side=n.gain(1);mid.connect(hp);hp.connect(lp);
-      // Reflexiones decorrelacionadas de banda limitada; cancelan al sumar a mono.
-      // Sin feedback, sin otra fuente, antes del compresor y limitador existentes.
-      for(const [time,amount] of [[.008,.18],[.013,-.12]]){const delay=ctx.createDelay(.03);n.all.push(delay);delay.delayTime.value=time;const level=n.gain(amount);lp.connect(delay);delay.connect(level);level.connect(side);}
-      const merge=n.make('ChannelMerger'),inverse=n.gain(-1);side.connect(merge,0,0);side.connect(inverse);inverse.connect(merge,0,1);
-      n.surroundWet=n.gain(0);merge.connect(n.surroundWet);n.surroundWet.connect(n.crossOut);n.surroundConnected=false;
-    }
-    if(!n.surroundWet)return;
-    clearTimeout(n.surroundTimer);n.surroundOn=on;
-    if(on&&!n.surroundConnected){n.color.connect(n.surroundSplit);n.surroundConnected=true;}
-    smoothParam(n.surroundWet.gain,on?1:0,ctx,immediate);
-    if(!on&&n.surroundConnected){const stop=()=>{if(n.surroundOn)return;try{n.color.disconnect(n.surroundSplit);}catch{}n.surroundConnected=false;};if(immediate)stop();else n.surroundTimer=setTimeout(stop,60);}
-  }
   function smoothParam(param,value,ctx,immediate=false){
     const now=ctx.currentTime;
     if(immediate){param.cancelScheduledValues(now);param.setValueAtTime(value,now);return;}
@@ -1822,7 +1827,6 @@
       param(n.limiter.threshold,e.ceiling);gain(n.limitDry,e.limiter?0:1);gain(n.limitWet,e.limiter?1:0);
       if(n.ceilingDb!==e.ceiling){const curve=new Float32Array(4097),peak=Math.pow(10,e.ceiling/20),knee=.8*peak;for(let i=0;i<curve.length;i++){const x=i*2/(curve.length-1)-1,a=Math.abs(x);curve[i]=a<=knee?x:Math.sign(x)*(knee+(peak-knee)*Math.tanh((a-knee)/(peak-knee)));}n.ceiling.curve=curve;n.ceilingDb=e.ceiling;}
     }
-    configureSurround(n,ctx,enabled&&e.surround,immediate);
     configureVirtualizer(n,ctx,enabled&&e.virtualizer,immediate);
     gain(n.dry,enabled?0:1);gain(n.wet,enabled?1:0);
     if(!enabled&&n.processing){const disconnect=()=>{if(n.wet.gain.value>.001)return;try{n.input.disconnect(n.preamp);}catch{}n.processing=false;clearTimeout(n.irTimer);n.convolver.buffer=null;};if(immediate)disconnect();else n.bypassTimer=setTimeout(disconnect,60);}
