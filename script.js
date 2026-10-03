@@ -1,12 +1,12 @@
 /*
- * Ayelén MP3 2.1.5 · Reproductor personal
+ * Ayelén MP3 2.1.6 · Reproductor personal
  * JavaScript nativo; sin compilación, claves, backend ni dependencias externas.
  * Secciones: utilidades / modelo y persistencia / Archive / interfaz / audio / acciones.
  * Las URLs de medios se construyen desde identificadores y nombres, nunca desde HTML remoto.
  */
 (() => {
   'use strict';
-  const VERSION = '2.1.5';
+  const VERSION = '2.1.6';
   const ARTWORK_REV = '2.1.5';
   const DB_NAME = 'sanavera-mp3-v2';
   const RESUME_KEY = 'smp.v2.resume';
@@ -1697,7 +1697,7 @@
   const dbLabel=value=>`${value>0?'+':''}${Number(value).toLocaleString('es-AR')} dB`;
   const audioAnalysisWanted=()=>!!meta&&(meta.settings.visualizer||meta.settings.equalizer.enabled);
   function createSoundGraph(ctx){
-    const n={all:[],processing:false,built:false,irCache:new Map(),irTimer:0,bypassTimer:0,responseTimer:0,responseDirty:true,responseAfter:0};
+    const n={all:[],processing:false,built:false,irCache:new Map(),irTimer:0,bypassTimer:0,responseTimer:0,responseDirty:true,responseAfter:0,routeTimer:0,routes:[],branches:[],paramTargets:new WeakMap(),analysisPost:false,analysisExpert:false};
     n.make=kind=>{const node=['ChannelSplitter','ChannelMerger'].includes(kind)?ctx['create'+kind](2):ctx['create'+kind]();n.all.push(node);return node;};
     n.gain=value=>{const g=n.make('Gain');g.gain.value=value;return g;};
     n.filter=(type,f,q=1)=>{const b=n.make('BiquadFilter');b.type=type;b.frequency.value=Math.min(f,ctx.sampleRate*.49);b.Q.value=q;return b;};
@@ -1707,11 +1707,10 @@
     for(const a of [n.pre,n.post]){a.fftSize=2048;a.smoothingTimeConstant=.72;a.minDecibels=-90;a.maxDecibels=-15;}
     n.left=n.make('Analyser');n.right=n.make('Analyser');n.left.fftSize=n.right.fftSize=1024;
     n.meterSplit=n.make('ChannelSplitter');
-    n.input.connect(n.dry);n.dry.connect(n.output);n.wet.connect(n.output);n.input.connect(n.pre);
-    n.output.connect(n.post);n.post.connect(ctx.destination);n.output.connect(n.meterSplit);n.meterSplit.connect(n.left,0);n.meterSplit.connect(n.right,1);
+    n.input.connect(n.dry);n.dry.connect(n.output);n.wet.connect(n.output);n.output.connect(ctx.destination);
     n.freq=new Uint8Array(n.post.frequencyBinCount);n.preFreq=new Uint8Array(n.pre.frequencyBinCount);n.timeL=new Float32Array(n.left.fftSize);n.timeR=new Float32Array(n.right.fftSize);
     n.responseFreq=Float32Array.from({length:192},(_,i)=>20*Math.pow(Math.min(20000,ctx.sampleRate*.49)/20,i/191));n.magnitude=new Float32Array(192);n.phase=new Float32Array(192);
-    n.dispose=()=>{clearTimeout(n.virtualTimer);clearTimeout(n.irTimer);clearTimeout(n.bypassTimer);clearTimeout(n.responseTimer);if(n.convolver)n.convolver.buffer=null;n.irCache.clear();n.all.forEach(node=>{try{node.disconnect();}catch{}});};
+    n.dispose=()=>{clearTimeout(n.routeTimer);clearTimeout(n.virtualTimer);clearTimeout(n.irTimer);clearTimeout(n.bypassTimer);clearTimeout(n.responseTimer);if(n.convolver)n.convolver.buffer=null;n.irCache.clear();n.all.forEach(node=>{try{node.disconnect();}catch{}});};
     return n;
   }
   function buildProcessing(n,ctx){
@@ -1719,18 +1718,19 @@
     n.graphic=EQ_FREQS.map((f,i)=>n.filter(i===0?'lowshelf':i===9?'highshelf':'peaking',f,1.15));
     n.legacy=[n.filter('lowshelf',160),n.filter('peaking',1000,.8),n.filter('highshelf',4000)];
     n.parametric=Array.from({length:6},()=>n.filter('peaking',1000));
-    let tail=n.preamp;for(const node of [...n.graphic,...n.legacy,...n.parametric]){tail.connect(node);tail=node;}
-    n.split=n.make('ChannelSplitter');tail.connect(n.split);
+    n.split=n.make('ChannelSplitter');
+    addFilterRoute(n,n.preamp,[...n.graphic,...n.legacy,...n.parametric],n.split);
     const mono=()=>{const g=n.gain(1);g.channelCount=1;g.channelCountMode='explicit';return g;};
     n.mid=mono();n.side=mono();
     const coefficient=(source,out,value,target)=>{const g=n.gain(value);source.connect(g,out);g.connect(target);return g;};
     coefficient(n.split,0,.5,n.mid);coefficient(n.split,1,.5,n.mid);coefficient(n.split,0,.5,n.side);coefficient(n.split,1,-.5,n.side);
     n.midFilters=Array.from({length:6},()=>n.filter('peaking',1000));n.sideFilters=Array.from({length:6},()=>n.filter('peaking',1000));
-    let m=n.mid,s=n.side;for(let i=0;i<6;i++){m.connect(n.midFilters[i]);m=n.midFilters[i];s.connect(n.sideFilters[i]);s=n.sideFilters[i];}
-    n.midGain=n.gain(1);n.sideGain=n.gain(1);m.connect(n.midGain);s.connect(n.sideGain);
+    n.midGain=n.gain(1);n.sideGain=n.gain(1);
+    addFilterRoute(n,n.mid,n.midFilters,n.midGain);addFilterRoute(n,n.side,n.sideFilters,n.sideGain);
     const l=mono(),r=mono();n.midGain.connect(l);n.midGain.connect(r);n.sideGain.connect(l);const inverse=n.gain(-1);n.sideGain.connect(inverse);inverse.connect(r);
     n.merge=n.make('ChannelMerger');l.connect(n.merge,0,0);r.connect(n.merge,0,1);
-    n.presence=n.filter('peaking',2800,.8);n.merge.connect(n.presence);n.color=n.gain(1);n.presence.connect(n.color);
+    n.presence=n.filter('peaking',2800,.8);n.colorFeed=n.gain(1);n.color=n.gain(1);n.colorFeed.connect(n.color);
+    addFilterRoute(n,n.merge,[n.presence],n.colorFeed);
     const harmonic=(type,f,drive)=>{
       const filter=n.filter(type,f,.707),shape=n.make('WaveShaper'),gain=n.gain(0),curve=new Float32Array(2049);
       for(let i=0;i<curve.length;i++){const x=i*2/(curve.length-1)-1;curve[i]=Math.tanh(drive*x)/Math.tanh(drive)-x;}
@@ -1746,13 +1746,83 @@
     n.verbHP=n.filter('highpass',180,.707);n.verbLP=n.filter('lowpass',6500,.707);n.delay=n.make('Delay');n.convolver=n.make('Convolver');n.verbWet=n.gain(0);
     n.verbHP.connect(n.verbLP);n.verbLP.connect(n.delay);n.delay.connect(n.convolver);n.convolver.connect(n.verbWet);n.verbWet.connect(n.reverbSum);n.verbConnected=false;
     n.compressor=n.make('DynamicsCompressor');n.compDry=n.gain(1);n.compWet=n.gain(0);n.compSum=n.gain(1);
-    n.reverbSum.connect(n.compDry);n.compDry.connect(n.compSum);n.reverbSum.connect(n.compressor);n.compressor.connect(n.compWet);n.compWet.connect(n.compSum);
+    n.reverbSum.connect(n.compDry);n.compDry.connect(n.compSum);n.compressor.connect(n.compWet);
+    n.compBranch=addSoundBranch(n,n.reverbSum,n.compressor,n.compWet,n.compSum);
     n.makeup=n.gain(1);n.compSum.connect(n.makeup);
     n.limiter=n.make('DynamicsCompressor');n.limiter.ratio.value=20;n.limiter.knee.value=0;n.limiter.attack.value=.002;n.limiter.release.value=.08;
     n.ceiling=n.make('WaveShaper');n.ceiling.oversample='2x';n.limitDry=n.gain(1);n.limitWet=n.gain(0);
     n.virtualInput=n.gain(1);
-    n.makeup.connect(n.limitDry);n.limitDry.connect(n.virtualInput);n.makeup.connect(n.limiter);n.limiter.connect(n.ceiling);n.ceiling.connect(n.limitWet);n.limitWet.connect(n.virtualInput);
+    n.makeup.connect(n.limitDry);n.limitDry.connect(n.virtualInput);n.limiter.connect(n.ceiling);n.ceiling.connect(n.limitWet);
+    n.limitBranch=addSoundBranch(n,n.makeup,n.limiter,n.limitWet,n.virtualInput);
     buildVirtualizer(n,ctx);
+  }
+  // Rutas neutras sin DSP. Los nodos se reutilizan; sólo cambian conexiones.
+  function addFilterRoute(n,input,filters,output){
+    input.connect(output);n.routes.push({input,filters,output,current:[],retiring:new Map()});
+  }
+  function wireFilterRoute(route,next){
+    if(next.length===route.current.length&&next.every((f,i)=>f===route.current[i]))return;
+    const before=[route.input,...route.current,route.output],after=[route.input,...next,route.output];
+    // Conservar las conexiones comunes evita reiniciar ramas que no cambiaron.
+    for(let i=0;i<before.length-1;i++){const j=after.indexOf(before[i]);if(j<0||after[j+1]!==before[i+1])before[i].disconnect(before[i+1]);}
+    for(let i=0;i<after.length-1;i++){const j=before.indexOf(after[i]);if(j<0||before[j+1]!==after[i+1])after[i].connect(after[i+1]);}
+    route.current=next;
+  }
+  function updateFilterRoutes(n,ctx,immediate,targets){
+    const inserted=[];
+    for(const route of n.routes){
+      const wanted=route.filters.filter(f=>!['peaking','lowshelf','highshelf'].includes(f.type)||(targets.get(f.gain)??n.paramTargets.get(f.gain)?.value??f.gain.value)!==0);
+      inserted.push(...wanted.filter(f=>!route.current.includes(f)));
+      for(const f of route.current){
+        if(wanted.includes(f)||immediate)route.retiring.delete(f);
+        else if(!route.retiring.has(f)){
+          // Esperar la rampa y la memoria IIR: también para frecuencias bajas/Q alta.
+          const q=Math.max(1,f.Q.value,n.paramTargets.get(f.Q)?.value||0),hz=Math.max(20,Math.min(f.frequency.value,n.paramTargets.get(f.frequency)?.value||f.frequency.value));
+          route.retiring.set(f,ctx.currentTime+.06+32*q/(Math.PI*hz));
+        }
+      }
+      wireFilterRoute(route,route.filters.filter(f=>wanted.includes(f)||route.retiring.has(f)));
+    }
+    return inserted;
+  }
+  function addSoundBranch(n,input,first,last,output){
+    const branch={input,first,last,output,connected:false,on:false,offAt:0};n.branches.push(branch);return branch;
+  }
+  function setSoundBranch(branch,on,ctx,immediate,start=ctx.currentTime){
+    branch.on=on;
+    if(on){branch.offAt=0;if(!branch.connected){branch.input.connect(branch.first);branch.last.connect(branch.output);branch.connected=true;}}
+    else if(branch.connected&&(immediate||!branch.offAt))branch.offAt=immediate?ctx.currentTime:start+.06;
+  }
+  function settleSoundRoutes(n,ctx){
+    clearTimeout(n.routeTimer);n.routeTimer=0;let next=Infinity;
+    for(const branch of n.branches){
+      if(branch.on||!branch.connected)continue;
+      if(ctx.currentTime+1e-6>=branch.offAt){branch.input.disconnect(branch.first);branch.last.disconnect(branch.output);branch.connected=false;branch.offAt=0;}
+      else next=Math.min(next,branch.offAt);
+    }
+    for(const route of n.routes){
+      let changed=false;
+      for(const [f,at] of route.retiring){if(ctx.currentTime+1e-6>=at){route.retiring.delete(f);changed=true;}else next=Math.min(next,at);}
+      if(changed)wireFilterRoute(route,route.current.filter(f=>route.retiring.has(f)||!['peaking','lowshelf','highshelf'].includes(f.type)||(n.paramTargets.get(f.gain)?.value??f.gain.value)!==0));
+    }
+    // El reloj de audio se detiene al suspenderse: no podar antes de la rampa.
+    if(Number.isFinite(next)&&ctx.state==='running')n.routeTimer=setTimeout(()=>settleSoundRoutes(n,ctx),Math.max(10,(next-ctx.currentTime)*1000+10));
+  }
+  function soundParam(n,param,value,ctx,immediate){
+    const prior=n.paramTargets.get(param);
+    if(prior?.value===value&&(!immediate||ctx.currentTime>=prior.at))return false;
+    if(!prior&&param.value===value){n.paramTargets.set(param,{value,at:ctx.currentTime});return false;}
+    const start=Math.max(ctx.currentTime,n.paramStart||0);
+    smoothParam(param,value,ctx,immediate,start);n.paramTargets.set(param,{value,at:immediate?ctx.currentTime:start+.035});return true;
+  }
+  function configureAnalysis(n,post,expert){
+    if(!n)return;
+    if(n.analysisPost!==post){if(post)n.output.connect(n.post);else n.output.disconnect(n.post);n.analysisPost=post;}
+    if(n.analysisExpert!==expert){
+      if(expert){n.input.connect(n.pre);n.output.connect(n.meterSplit);n.meterSplit.connect(n.left,0);n.meterSplit.connect(n.right,1);}
+      else{n.input.disconnect(n.pre);n.output.disconnect(n.meterSplit);n.meterSplit.disconnect(n.left,0);n.meterSplit.disconnect(n.right,1);}
+      n.analysisExpert=expert;
+    }
   }
   // Virtualizer lineal, sin feedback, saturación ni otra fuente de audio.
   // M=(L+R)/2; V=.20*(M[t-7.1ms]-M[t-11.7ms]).
@@ -1773,14 +1843,15 @@
   function configureVirtualizer(n,ctx,on,immediate){
     if(!n.virtualInput)return;clearTimeout(n.virtualTimer);n.virtualOn=on;
     if(on&&!n.virtualConnected){n.virtualInput.connect(n.virtualSplit);n.virtualConnected=true;}
-    smoothParam(n.virtualDry.gain,on?0:1,ctx,immediate);smoothParam(n.virtualWet.gain,on?1/1.4:0,ctx,immediate);
+    soundParam(n,n.virtualDry.gain,on?0:1,ctx,immediate);soundParam(n,n.virtualWet.gain,on?1/1.4:0,ctx,immediate);
     if(!on&&n.virtualConnected){const stop=()=>{if(n.virtualOn)return;try{n.virtualInput.disconnect(n.virtualSplit);}catch{}n.virtualConnected=false;};if(immediate)stop();else n.virtualTimer=setTimeout(stop,60);}
   }
-  function smoothParam(param,value,ctx,immediate=false){
+  function smoothParam(param,value,ctx,immediate=false,start=ctx.currentTime){
     const now=ctx.currentTime;
     if(immediate){param.cancelScheduledValues(now);param.setValueAtTime(value,now);return;}
     if(param.cancelAndHoldAtTime)param.cancelAndHoldAtTime(now);else{const v=param.value;param.cancelScheduledValues(now);param.setValueAtTime(v,now);}
-    param.linearRampToValueAtTime(value,now+.035);
+    if(start>now)param.setValueAtTime(param.value,start);
+    param.linearRampToValueAtTime(value,Math.max(now,start)+.035);
   }
   function impulseResponse(n,ctx,seconds){
     const key=seconds.toFixed(2);if(n.irCache.has(key))return n.irCache.get(key);
@@ -1794,7 +1865,7 @@
     n.irCache.set(key,buffer);if(n.irCache.size>3)n.irCache.delete(n.irCache.keys().next().value);return buffer;
   }
   function configureGraph(n,ctx,e,immediate=false){
-    const gain=(node,v)=>smoothParam(node.gain,v,ctx,immediate),param=(p,v)=>smoothParam(p,v,ctx,immediate);
+    let changed=false;const targets=new Map(),param=(p,v)=>targets.set(p,v),gain=(node,v)=>param(node.gain,v);
     const enabled=e.enabled&&eqHasProcessing(e);clearTimeout(n.bypassTimer);
     if(enabled){
       buildProcessing(n,ctx);
@@ -1805,12 +1876,12 @@
       n.graphic.forEach((f,i)=>{param(f.gain,e.bands[i]);param(f.Q,e.q);});n.legacy.forEach((f,i)=>param(f.gain,e.legacy[i]));
       const configure=(filters,channel)=>filters.forEach((f,i)=>{
         const p=e.parametric[i],active=p?.enabled&&p.channel===channel;
-        f.type=active?p.type:'peaking';param(f.frequency,Math.min(active?p.frequency:1000,ctx.sampleRate*.49));param(f.gain,active?p.gain:0);param(f.Q,active?p.q:1);
+        const type=active?p.type:'peaking';if(f.type!==type){f.type=type;changed=true;}param(f.frequency,Math.min(active?p.frequency:1000,ctx.sampleRate*.49));param(f.gain,active?p.gain:0);param(f.Q,active?p.q:1);
       });configure(n.parametric,'stereo');configure(n.midFilters,'mid');configure(n.sideFilters,'side');
       gain(n.midGain,Math.pow(10,e.midGain/20));gain(n.sideGain,e.width/100*Math.pow(10,e.sideGain/20));param(n.presence.gain,e.presence);
       for(const [branch,value] of [[n.bass,e.bassEnhancer],[n.treble,e.trebleExciter]]){
-        if(value>0&&!branch.connected){n.presence.connect(branch.filter);branch.connected=true;}
-        if(!value&&branch.connected){n.presence.disconnect(branch.filter);branch.connected=false;}gain(branch.gain,value/100*.18);
+        if(value>0&&!branch.connected){n.colorFeed.connect(branch.filter);branch.connected=true;}
+        if(!value&&branch.connected){n.colorFeed.disconnect(branch.filter);branch.connected=false;}gain(branch.gain,value/100*.18);
       }
       const c=e.crossfeed/100*.55;gain(n.crossDry,1/(1+c));gain(n.crossWet,c/(1+c));
       if(c&&!n.crossConnected){n.color.connect(n.crossSplit);n.crossConnected=true;}else if(!c&&n.crossConnected){n.color.disconnect(n.crossSplit);n.crossConnected=false;}
@@ -1827,20 +1898,36 @@
       param(n.limiter.threshold,e.ceiling);gain(n.limitDry,e.limiter?0:1);gain(n.limitWet,e.limiter?1:0);
       if(n.ceilingDb!==e.ceiling){const curve=new Float32Array(4097),peak=Math.pow(10,e.ceiling/20),knee=.8*peak;for(let i=0;i<curve.length;i++){const x=i*2/(curve.length-1)-1,a=Math.abs(x);curve[i]=a<=knee?x:Math.sign(x)*(knee+(peak-knee)*Math.tanh((a-knee)/(peak-knee)));}n.ceiling.curve=curve;n.ceilingDb=e.ceiling;}
     }
+    const starts=new Map(),now=ctx.currentTime;
+    if(enabled){
+      const inserted=updateFilterRoutes(n,ctx,immediate,targets);
+      // Calentar sólo la rama reconectada, sin demorar otros efectos ni la reverb.
+      if(!immediate){
+        for(const f of inserted)if(['peaking','lowshelf','highshelf'].includes(f.type))starts.set(f.gain,now+128/ctx.sampleRate);
+        for(const [branch,on,dry,wet] of [[n.compBranch,e.compressor,n.compDry,n.compWet],[n.limitBranch,e.limiter,n.limitDry,n.limitWet]]){
+          if(on&&!branch.connected){const at=now+.012+256/ctx.sampleRate;starts.set(dry.gain,at);starts.set(wet.gain,at);}
+        }
+      }
+    }
+    if(n.built){setSoundBranch(n.compBranch,enabled&&e.compressor,ctx,immediate);setSoundBranch(n.limitBranch,enabled&&e.limiter,ctx,immediate);}
     configureVirtualizer(n,ctx,enabled&&e.virtualizer,immediate);
     gain(n.dry,enabled?0:1);gain(n.wet,enabled?1:0);
+    let responseAt=now;
+    for(const [p,v] of targets){n.paramStart=starts.get(p)||now;if(soundParam(n,p,v,ctx,immediate)){changed=true;responseAt=Math.max(responseAt,n.paramStart);}}
+    n.paramStart=0;if(n.built)settleSoundRoutes(n,ctx);
     if(!enabled&&n.processing){const disconnect=()=>{if(n.wet.gain.value>.001)return;try{n.input.disconnect(n.preamp);}catch{}n.processing=false;clearTimeout(n.irTimer);n.convolver.buffer=null;};if(immediate)disconnect();else n.bypassTimer=setTimeout(disconnect,60);}
-    n.responseDirty=true;n.responseAfter=ctx.currentTime+(immediate?0:.04);
+    if(changed){n.responseDirty=true;n.responseAfter=responseAt+(immediate?0:.04);}
   }
   function applyEqualizer(immediate=false){
     const n=sound.nodes,ctx=sound.context;if(!n||!ctx||ctx.state==='closed'||!meta)return;
     configureGraph(n,ctx,meta.settings.equalizer,immediate);
-    clearTimeout(n.responseTimer);n.responseTimer=setTimeout(()=>drawResponse(),55);
+    clearTimeout(n.responseTimer);n.responseTimer=0;
+    if(n.responseDirty&&!document.hidden&&dialog?.open&&$('#aye-response'))n.responseTimer=setTimeout(()=>{n.responseTimer=0;drawResponse();},55);
   }
 
   function disconnectSound(){
     clearTimeout(sound.resumeTimer);sound.resumeTask=null;stopVisuals();
-    const n=sound.nodes;if(n){n.output.gain.value=0;clearTimeout(n.irTimer);clearTimeout(n.bypassTimer);if(n.convolver)n.convolver.buffer=null;if(n.processing){try{n.input.disconnect(n.preamp);}catch{}n.processing=false;}}
+    const n=sound.nodes;if(n){n.output.gain.value=0;clearTimeout(n.routeTimer);n.routeTimer=0;clearTimeout(n.irTimer);clearTimeout(n.bypassTimer);if(n.convolver)n.convolver.buffer=null;if(n.processing){try{n.input.disconnect(n.preamp);}catch{}n.processing=false;}}
     try{sound.source?.disconnect();}catch{}
     sound.source=null;sound.element=null;
   }
@@ -1912,7 +1999,7 @@
     try{
       if(!sound.context){
         const Context=audioContextClass();sound.context=new Context({latencyHint:'playback'});sound.nodes=createSoundGraph(sound.context);
-        const ctx=sound.context;ctx.onstatechange=()=>{if(sound.context!==ctx)return;updateEqualizerUI();syncVisuals();if(ctx.state==='running'){clearTimeout(sound.resumeTimer);return;}if(player.wants&&sound.element===audio)wakeSound();};
+        const ctx=sound.context;ctx.onstatechange=()=>{if(sound.context!==ctx)return;updateEqualizerUI();syncVisuals();if(ctx.state==='running'){clearTimeout(sound.resumeTimer);settleSoundRoutes(sound.nodes,ctx);return;}if(player.wants&&sound.element===audio)wakeSound();};
       }
       sound.source=sound.context.createMediaElementSource(audio);sound.element=audio;sound.nodes.output.gain.value=1;
       sound.source.connect(sound.nodes.input);applyEqualizer(true);wakeSound(true);syncVisuals();
@@ -2080,7 +2167,7 @@
     let c=visuals.contexts.get(canvas);if(!c){c=canvas.getContext('2d',{alpha:true});visuals.contexts.set(canvas,c);}if(!c)return null;
     c.setTransform(ratio,0,0,ratio,0,0);c.clearRect(0,0,w,h);return {c,w,h};
   }
-  function stopVisuals(){if(visuals.raf)cancelAnimationFrame(visuals.raf);visuals.raf=0;visuals.last=0;}
+  function stopVisuals(){if(visuals.raf)cancelAnimationFrame(visuals.raf);visuals.raf=0;visuals.last=0;configureAnalysis(sound.nodes,false,false);}
   function syncVisuals(){
     if(!root||!meta)return;
     const e=meta.settings.equalizer,expert=dialog?.open&&!!$('#smp-equalizer')&&e.mode==='expert';
@@ -2090,6 +2177,7 @@
     if(document.hidden||audio.paused||sound.element!==audio||sound.context?.state!=='running'||(!visuals.targets.length&&!expert)){
       stopVisuals();visuals.targets.forEach(c=>canvasSurface(c));return;
     }
+    configureAnalysis(sound.nodes,true,!!expert);
     visuals.color=getComputedStyle(root).getPropertyValue('--accent').trim()||'#f18a72';
     visuals.motion||=matchMedia('(prefers-reduced-motion: reduce)');
     if(!visuals.raf)visuals.raf=requestAnimationFrame(drawVisuals);
@@ -2120,7 +2208,7 @@
   }
   function drawVisuals(now){
     visuals.raf=0;
-    if(document.hidden||audio.paused||sound.context?.state!=='running'||sound.element!==audio)return;
+    if(document.hidden||audio.paused||sound.context?.state!=='running'||sound.element!==audio){stopVisuals();return;}
     const hz=visuals.motion?.matches?8:visuals.targets.some(c=>c.dataset.visual!=='mini')?30:15;
     if(now-visuals.last>=1000/hz){
       visuals.last=now;visuals.frames++;const n=sound.nodes;n.post.getByteFrequencyData(n.freq);
@@ -2130,7 +2218,7 @@
     if(visuals.targets.length||visuals.expert)visuals.raf=requestAnimationFrame(drawVisuals);
   }
   function drawResponse(){
-    if(!root||!dialog?.open)return;const canvas=$('#aye-response');if(!canvas)return;
+    if(document.hidden||!root||!dialog?.open)return;const canvas=$('#aye-response');if(!canvas)return;
     const surface=canvasSurface(canvas);if(!surface)return;const {c,w,h}=surface,x0=w*.06,y0=h*.12,pw=w*.88,ph=h*.76;
     c.strokeStyle='#8883';c.lineWidth=1;for(const db of [-12,-6,0,6,12]){const y=y0+(12-db)/24*ph;c.beginPath();c.moveTo(x0,y);c.lineTo(x0+pw,y);c.stroke();}
     for(const f of [31,125,500,2000,8000]){const x=x0+paramX(f)/100*pw;c.beginPath();c.moveTo(x,y0);c.lineTo(x,y0+ph);c.stroke();}
@@ -2309,9 +2397,11 @@
   }
   function updateProgress(){
     const duration=Number.isFinite(audio.duration)?audio.duration:0,position=player.pendingSeek??(audio.readyState?audio.currentTime:player.position),percent=duration?clamp(position/duration*100,0,100):0;
-    $$('[data-time="current"]').forEach(el=>{el.textContent=fmt(position);});$$('[data-time="duration"]').forEach(el=>{el.textContent=duration?fmt(duration):(currentTrack()?.duration?fmt(currentTrack().duration):'0:00');});
-    $$('[data-seek]').forEach(el=>{if(el.dataset.scrubbing)return;el.value=String(percent*10);el.disabled=!duration;el.style.setProperty('--progress',percent+'%');el.setAttribute('aria-valuetext',`${fmt(position)} de ${fmt(duration)}`);});
-    $('#smp-mini-progress').style.width=percent+'%';
+    if(!document.hidden){
+      $$('[data-time="current"]').forEach(el=>{el.textContent=fmt(position);});$$('[data-time="duration"]').forEach(el=>{el.textContent=duration?fmt(duration):(currentTrack()?.duration?fmt(currentTrack().duration):'0:00');});
+      $$('[data-seek]').forEach(el=>{if(el.dataset.scrubbing)return;el.value=String(percent*10);el.disabled=!duration;el.style.setProperty('--progress',percent+'%');el.setAttribute('aria-valuetext',`${fmt(position)} de ${fmt(duration)}`);});
+      $('#smp-mini-progress').style.width=percent+'%';
+    }
     if(navigator.mediaSession&&Date.now()-lastPositionUpdate>1000&&duration>0){lastPositionUpdate=Date.now();try{navigator.mediaSession.setPositionState({duration,playbackRate:audio.playbackRate||1,position:clamp(position,0,duration)});}catch{}}
   }
   function updatePlayerUI(){
@@ -2396,7 +2486,7 @@
   function showSleep(){
     showDialog('Una canción más… y a descansar',`<p class="smp-note">El temporizador pausa la música. Si el sistema suspende por completo la pestaña, se aplica al volver a activarla.</p><div class="smp-menu">${[15,30,45,60,90].map(m=>btn(`${m} minutos`,'sleep-set',{minutes:m},'smp-menu-item','moon')).join('')}${btn('Al terminar esta canción','sleep-end',{},'smp-menu-item','music')}${btn('Desactivar temporizador','sleep-cancel',{},'smp-menu-item','close')}</div>`);
   }
-  function updateSleepLabel(){ $('#smp-sleep-label').textContent=player.sleepEnd?'Fin del tema':player.sleepAt?Math.max(1,Math.ceil((player.sleepAt-Date.now())/60000))+' min':'Timer'; }
+  function updateSleepLabel(){ if(document.hidden)return;$('#smp-sleep-label').textContent=player.sleepEnd?'Fin del tema':player.sleepAt?Math.max(1,Math.ceil((player.sleepAt-Date.now())/60000))+' min':'Timer'; }
   function checkSleep(){if(player.sleepAt&&Date.now()>=player.sleepAt){player.sleepAt=0;pausePlayer();toast('Terminó el temporizador. Que descanses.');}updateSleepLabel();}
 
   // Biblioteca: cambios puntuales, confirmaciones para acciones destructivas y respaldo versionado.
@@ -2738,7 +2828,7 @@
     window.addEventListener('online',()=>{updateConnectivity();toast('Volvió la conexión. Tocá Play para continuar.');});
     window.addEventListener('offline',updateConnectivity);
     window.addEventListener('pagehide',()=>{saveResume(true);flush();});
-    document.addEventListener('visibilitychange',()=>{if(document.hidden){saveResume(true);flush();stopVisuals();}else{checkSleep();if(player.wants)wakeSound();syncVisuals();}});
+    document.addEventListener('visibilitychange',()=>{if(document.hidden){saveResume(true);flush();stopVisuals();}else{checkSleep();updateProgress();if(player.wants)wakeSound();syncVisuals();}});
     document.addEventListener('keydown',e=>{
       if(!root.isConnected||(!root.contains(e.target)&&root.dataset.fullscreen!=='true'))return;
       if(dialog.open)return;
